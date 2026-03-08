@@ -1,1 +1,5 @@
 maia2/maia2_models/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
