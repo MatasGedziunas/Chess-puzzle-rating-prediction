@@ -20,8 +20,8 @@ def load_data(csv_path, embeddings_path, num_rows=None):
 def extract_board_stats(fen):
     board = chess.Board(fen)
     counts = {
-        'white_pieces': len(board.occupied_co[chess.WHITE]),
-        'black_pieces': len(board.occupied_co[chess.BLACK]),
+        'white_pieces': int(board.occupied_co[chess.WHITE]).bit_count(),
+        'black_pieces': int(board.occupied_co[chess.BLACK]).bit_count(),
         'material_balance': sum([len(board.pieces(piece, chess.WHITE)) * val 
                                for piece, val in zip([1,2,3,4,5,6], [1,3,3,5,9,0])]) - \
                            sum([len(board.pieces(piece, chess.BLACK)) * val 
@@ -46,8 +46,8 @@ def encode_themes(df):
     themes_df = pd.DataFrame(themes_encoded, columns=mlb.classes_, index=df.index)
     return themes_df
 
-def run_pipeline(csv_path, embeddings_path):
-    df, maia_3d = load_data(csv_path, embeddings_path)
+def run_pipeline(csv_path, embeddings_path, num_rows=None):
+    df, maia_3d = load_data(csv_path, embeddings_path, num_rows=num_rows)
     X_struct = build_features(df)
     X_themes = encode_themes(df)
     X_maia = maia_3d.reshape(len(maia_3d), -1)
@@ -98,4 +98,4 @@ def run_pipeline(csv_path, embeddings_path):
     print("Results saved to ../features/model_results.csv")
 
 if __name__ == "__main__":
-    run_pipeline("./data/puzzle50000.csv", "./features/maia2_latent_features.npy")
+    run_pipeline("./data/puzzle50000.csv", "./latentFeatures/maia2_latent_subset_2k.npy", num_rows=1000)
