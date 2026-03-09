@@ -1,0 +1,7 @@
+pandas
+numpy
+python-chess
+lightgbm
+scikit-learn
+tqdm
+maia2
