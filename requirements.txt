@@ -5,3 +5,5 @@ lightgbm
 scikit-learn
 tqdm
 maia2
+gdown
+pyzstd
