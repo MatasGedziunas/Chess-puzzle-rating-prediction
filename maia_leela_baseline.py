@@ -102,7 +102,8 @@ def build_features(df):
     prob_cols = [c for c in df.columns if 'success_prob_blitz' in c]
     feats = pd.concat([feats, df[prob_cols]], axis=1)
     
-    return feats.values.astype(np.float32)
+    length = feats.pop('SolutionLength').values
+    return feats.values.astype(np.float32), length
 
 def encode_themes(df):
     themes_list = df['Themes'].apply(lambda x: x.split())
@@ -112,10 +113,11 @@ def encode_themes(df):
 
 
 class ChessPuzzleDataset(Dataset):
-    def __init__(self, X_struct, X_themes, X_maia_seq, ratings):
+    def __init__(self, X_struct, X_themes, X_maia_seq, move_lengths, ratings):
         self.X_struct = torch.tensor(X_struct, dtype=torch.float32)
         self.X_themes = torch.tensor(X_themes, dtype=torch.float32)
         self.X_seq = torch.tensor(X_maia_seq, dtype=torch.float32)
+        self.lengths = torch.tensor(np.clip(move_lengths, 0, 15), dtype=torch.long)
         self.ratings = torch.tensor(ratings, dtype=torch.float32).unsqueeze(1)
         
     def __len__(self):
@@ -125,6 +127,7 @@ class ChessPuzzleDataset(Dataset):
         return (self.X_struct[idx], 
                 self.X_themes[idx], 
                 self.X_seq[idx], 
+                self.lengths[idx], 
                 self.ratings[idx])
 
 
@@ -133,6 +136,8 @@ class PuzzleRatingMLP(nn.Module):
                  struct_in_dim, 
                  themes_in_dim, 
                  seq_embed_dim, 
+                 max_moves=16, 
+                 move_embed_dim=32,
                  hidden_dim=256):
         super(PuzzleRatingMLP, self).__init__()
         
@@ -150,6 +155,8 @@ class PuzzleRatingMLP(nn.Module):
             nn.ReLU()
         )
         
+        self.length_embed = nn.Embedding(max_moves, move_embed_dim)
+        
         self.rnn = nn.RNN(
             input_size=seq_embed_dim,
             hidden_size=hidden_dim,
@@ -158,7 +165,7 @@ class PuzzleRatingMLP(nn.Module):
             bidirectional=False
         )
         
-        combined_dim = (hidden_dim // 2) + (hidden_dim // 2) + hidden_dim
+        combined_dim = (hidden_dim // 2) + (hidden_dim // 2) + move_embed_dim + hidden_dim
         
         self.predictor = nn.Sequential(
             nn.Linear(combined_dim, hidden_dim),
@@ -169,14 +176,15 @@ class PuzzleRatingMLP(nn.Module):
             nn.Linear(hidden_dim // 2, 1)
         )
         
-    def forward(self, struct_in, themes_in, seq_in):
+    def forward(self, struct_in, themes_in, seq_in, length_in):
         struct_feats = self.struct_mlp(struct_in)
         themes_feats = self.themes_mlp(themes_in)
+        len_feats = self.length_embed(length_in)
         
         rnn_out, rnn_hidden = self.rnn(seq_in)
         seq_feats = rnn_hidden[-1]
         
-        combined = torch.cat([struct_feats, themes_feats, seq_feats], dim=1)
+        combined = torch.cat([struct_feats, themes_feats, seq_feats, len_feats], dim=1)
         
         rating_pred = self.predictor(combined)
         return rating_pred
@@ -196,10 +204,10 @@ def train_loop(model, train_loader, val_loader, epochs=50, lr=0.001, device='cpu
         train_loss = 0.0
         
         for batch in train_loader:
-            struct, themes, seq, ratings = [b.to(device) for b in batch]
+            struct, themes, seq, lengths, ratings = [b.to(device) for b in batch]
             
             optimizer.zero_grad()
-            preds = model(struct, themes, seq)
+            preds = model(struct, themes, seq, lengths)
             loss = criterion(preds, ratings)
             loss.backward()
             optimizer.step()
@@ -213,8 +221,8 @@ def train_loop(model, train_loader, val_loader, epochs=50, lr=0.001, device='cpu
         val_loss = 0.0
         with torch.no_grad():
             for batch in val_loader:
-                struct, themes, seq, ratings = [b.to(device) for b in batch]
-                preds = model(struct, themes, seq)
+                struct, themes, seq, lengths, ratings = [b.to(device) for b in batch]
+                preds = model(struct, themes, seq, lengths)
                 loss = criterion(preds, ratings)
                 val_loss += loss.item() * len(ratings)
                 
@@ -253,15 +261,15 @@ if __name__ == "__main__":
     mlflow.set_experiment("Chess_Puzzle_Rating_Prediction")
     
     df, maia_seq = load_data(csv_path, embeddings_path, num_rows=1000)
-    X_struct = build_features(df)
+    X_struct, move_lengths = build_features(df)
     X_themes = encode_themes(df)
     y = df['Rating'].values
     
     indices = np.arange(len(df))
     train_idx, val_idx = train_test_split(indices, test_size=0.1, random_state=42)
     
-    train_dataset = ChessPuzzleDataset(X_struct[train_idx], X_themes[train_idx], maia_seq[train_idx], y[train_idx])
-    val_dataset = ChessPuzzleDataset(X_struct[val_idx], X_themes[val_idx], maia_seq[val_idx], y[val_idx])
+    train_dataset = ChessPuzzleDataset(X_struct[train_idx], X_themes[train_idx], maia_seq[train_idx], move_lengths[train_idx], y[train_idx])
+    val_dataset = ChessPuzzleDataset(X_struct[val_idx], X_themes[val_idx], maia_seq[val_idx], move_lengths[val_idx], y[val_idx])
     
     batch_size = 128
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -283,7 +291,7 @@ if __name__ == "__main__":
         mlflow.log_param("batch_size", batch_size)
         mlflow.log_param("learning_rate", 0.001)
         mlflow.log_param("epochs", 50000)
-        mlflow.log_param("features", "struct_themes_maiaSeq")
+        mlflow.log_param("features", "struct_themes_maiaSeq_len")
         mlflow.log_param("rnn_hidden_dim", 256)
         
         best_model, final_mse, final_rmse = train_loop(model, train_loader, val_loader, epochs=50000, device=device, print_freq=100)
@@ -294,4 +302,4 @@ if __name__ == "__main__":
         out_dir = f"./results/p200k"
         os.makedirs(out_dir, exist_ok=True)
         result = pd.DataFrame([{'Validation_MSE': final_mse, 'Validation_RMSE': final_rmse}])
-        result.to_csv(f"{out_dir}/lenInStructFeats.csv", index=False)
+        result.to_csv(f"{out_dir}/maia_leela_baseline_results.csv", index=False)
