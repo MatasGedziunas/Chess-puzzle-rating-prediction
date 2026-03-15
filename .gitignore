@@ -5,4 +5,4 @@ checkpoints/
 *.ckpt
 features/
 stockfish/
-
+data/
