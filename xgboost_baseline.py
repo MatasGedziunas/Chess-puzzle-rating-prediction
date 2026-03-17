@@ -13,10 +13,11 @@ def flatten_maia_embeddings(maia_seq):
     return maia_seq.mean(axis=1)
 
 
-def prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths):
+def prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths, stockfish_features=None):
     lengths_2d = move_lengths.reshape(-1, 1).astype(np.float32)
-    # X = np.concatenate([X_struct, X_themes, maia_seq_flat, lengths_2d], axis=1)
-    X = np.concatenate([X_struct, X_themes, lengths_2d], axis=1)
+    X = np.concatenate([X_struct, X_themes, maia_seq_flat, lengths_2d], axis=1)
+    if stockfish_features is not None:
+        X = np.concatenate([X, stockfish_features], axis=1)
     return X
 
 
@@ -25,22 +26,25 @@ if __name__ == "__main__":
     csv_path = "./data/p200k.csv"
     # embeddings_path = None
     embeddings_path = "./data/p200k/maia2.npy"
+    stockfish_path = "./data/p200k_sf_evals.csv"
     num_rows = None
     
     mlflow.set_experiment("Chess_Puzzle_Rating_Prediction")
     
-    df, maia_seq = load_data(csv_path, embeddings_path, num_rows=num_rows)
+    df, maia_seq, stockfish_features = load_data(csv_path, embeddings_path, stockfish_path, num_rows=num_rows)
     X_struct, move_lengths = build_features(df)
     X_themes = encode_themes(df)
     maia_seq_flat = flatten_maia_embeddings(maia_seq)
     y = df['Rating'].values
     
-    X = prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths)
+    X = prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths, stockfish_features)
     print(f"Total feature dimension: {X.shape[1]}")
     print(f"  Struct features: {X_struct.shape[1]}")
     print(f"  Theme features:  {X_themes.shape[1]}")
     print(f"  Maia embeddings: {maia_seq_flat.shape[1]}")
     print(f"  Length feature:   1")
+    if stockfish_features is not None:
+        print(f"  Stockfish features: {stockfish_features.shape[1]}")
     
     indices = np.arange(len(df))
     train_idx, val_idx = train_test_split(indices, test_size=0.1, random_state=42)
@@ -109,4 +113,4 @@ if __name__ == "__main__":
             'Train_RMSE': train_rmse,
             'Best_Iteration': model.best_iteration,
         }])
-        result.to_csv(f"{out_dir}/xgboost_baseline_results_noMaia.csv", index=False)
+        result.to_csv(f"{out_dir}/xgboost_baseline_results_with_stockfish.csv", index=False)

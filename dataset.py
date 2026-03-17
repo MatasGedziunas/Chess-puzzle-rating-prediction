@@ -65,7 +65,7 @@ def process_puzzle_sequences(df, elo_indices=[0, 5, 10], max_steps=10):
     return sequence_results
 
 
-def load_data(csv_path, embeddings_path=None, num_rows=None):
+def load_data(csv_path, embeddings_path=None, stockfish_path=None, num_rows=None):
     df = pd.read_csv(csv_path)
     if num_rows:
         df = df.head(num_rows)
@@ -73,7 +73,7 @@ def load_data(csv_path, embeddings_path=None, num_rows=None):
     if embeddings_path and os.path.exists(embeddings_path):
         maia_embeddings = np.load(embeddings_path)
         if len(maia_embeddings) != len(df):
-            maia_embeddings = maia_embeddings[:len(df)]
+            raise ValueError("Embeddings length does not match dataset length")
     else:
         maia_embeddings = process_puzzle_sequences(df)
         
@@ -84,7 +84,15 @@ def load_data(csv_path, embeddings_path=None, num_rows=None):
         np.save(save_path, maia_embeddings)
         print(f"Saved computed embeddings to {save_path}")
         
-    return df, maia_embeddings
+    if stockfish_path:
+        sf_df = pd.read_csv(stockfish_path)
+        df = df.merge(sf_df, on='PuzzleId', how='left')
+        sf_cols = ['SF_Material', 'SF_Positional', 'SF_Final_Eval']
+        stockfish_features = df[sf_cols].fillna(0).values.astype(np.float32)
+    else: 
+        stockfish_features = None
+    
+    return df, maia_embeddings, stockfish_features
 
 
 def extract_board_stats(fen):
