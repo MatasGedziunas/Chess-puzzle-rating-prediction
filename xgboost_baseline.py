@@ -15,15 +15,16 @@ def flatten_maia_embeddings(maia_seq):
 
 def prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths):
     lengths_2d = move_lengths.reshape(-1, 1).astype(np.float32)
-    X = np.concatenate([X_struct, X_themes, maia_seq_flat, lengths_2d], axis=1)
+    # X = np.concatenate([X_struct, X_themes, maia_seq_flat, lengths_2d], axis=1)
+    X = np.concatenate([X_struct, X_themes, lengths_2d], axis=1)
     return X
 
 
 if __name__ == "__main__":
     
     csv_path = "./data/p200k.csv"
-    embeddings_path = None
-    # embeddings_path = "../features/maia2_sequence_embeddings.npy"
+    # embeddings_path = None
+    embeddings_path = "./data/p200k/maia2.npy"
     num_rows = None
     
     mlflow.set_experiment("Chess_Puzzle_Rating_Prediction")
@@ -52,8 +53,8 @@ if __name__ == "__main__":
         "learning_rate": 0.1,
         "max_leaves": 63,
         "max_bin": 63,
-        "tree_method": "gpu_hist",
-        "device": "cuda",
+        "tree_method": "hist",
+        "device": "cpu",
         "objective": "reg:squarederror",
         "eval_metric": "rmse",
         "early_stopping_rounds": 50,
@@ -108,4 +109,4 @@ if __name__ == "__main__":
             'Train_RMSE': train_rmse,
             'Best_Iteration': model.best_iteration,
         }])
-        result.to_csv(f"{out_dir}/xgboost_baseline_results.csv", index=False)
+        result.to_csv(f"{out_dir}/xgboost_baseline_results_noMaia.csv", index=False)

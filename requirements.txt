@@ -8,3 +8,5 @@ maia2
 gdown
 pyzstd
 mlflow
+einops
+xgboost
