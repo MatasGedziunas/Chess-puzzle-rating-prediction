@@ -10,3 +10,4 @@ pyzstd
 mlflow
 einops
 xgboost
+argparse
