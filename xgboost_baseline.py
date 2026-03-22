@@ -113,4 +113,4 @@ if __name__ == "__main__":
             'Train_RMSE': train_rmse,
             'Best_Iteration': model.best_iteration,
         }])
-        result.to_csv(f"{out_dir}/xgboost_baseline_results_with_stockfish.csv", index=False)
+        result.to_csv(f"{out_dir}/xgboost_baseline_results_with_stockfishDiff.csv", index=False)
