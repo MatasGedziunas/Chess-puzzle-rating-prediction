@@ -43,7 +43,7 @@ if __name__ == "__main__":
     X_themes = encode_themes(df)
     maia_seq_flat = flatten_maia_embeddings(maia_seq)
     y = df['Rating'].values
-    
+
     mask = np.ones(len(y), dtype=bool)
     if min_rating is not None:
         mask &= (y >= min_rating)
@@ -58,6 +58,8 @@ if __name__ == "__main__":
         stockfish_features = stockfish_features[mask]
     y = y[mask]
     df = df[mask]
+    max_num_rows = 60000
+    df = df.head(max_num_rows)
     
     X = prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths, stockfish_features)
     print(f"Total feature dimension: {X.shape[1]}")
@@ -126,8 +128,6 @@ if __name__ == "__main__":
         print(f"  Val   MSE: {val_mse:.2f} (RMSE: {val_rmse:.2f})")
         print(f"  Best iteration: {model.best_iteration}")
         
-        mlflow.xgboost.log_model(model, "xgboost_baseline_model")
-        
         out_dir = "./results/p200k"
         os.makedirs(out_dir, exist_ok=True)
         result = pd.DataFrame([{
@@ -143,5 +143,7 @@ if __name__ == "__main__":
         suffix = ""
         if min_rating is not None or max_rating is not None:
             suffix = f"_{min_rating or 'min'}to{max_rating or 'max'}"
+
+        mlflow.xgboost.log_model(model, f"xgboost_baseline_model{suffix}")    
             
         result.to_csv(f"{out_dir}/xgboost_baseline_results_with_stockfishDiff{suffix}.csv", index=False)
