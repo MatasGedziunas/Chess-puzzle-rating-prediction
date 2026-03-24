@@ -237,6 +237,14 @@ def build_features(df):
     return feats.values.astype(np.float32), length
 
 
+def load_stockfish_features(stockfish_evals_path, puzzles_df):
+    sf_df = pd.read_csv(stockfish_evals_path)
+    sf_df = sf_df[sf_df['PuzzleId'].isin(puzzles_df['PuzzleId'])]
+    merged = puzzles_df[['PuzzleId']].merge(sf_df, on='PuzzleId', how='left')
+    sf_cols = ['SF_Material', 'SF_Positional', 'SF_Final_Eval']
+    return merged[sf_cols].fillna(0).values.astype(np.float32)
+
+
 def encode_themes(df):
     themes_list = df['Themes'].apply(lambda x: x.split())
     mlb = MultiLabelBinarizer()
