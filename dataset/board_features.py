@@ -1,0 +1,327 @@
+import chess
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MultiLabelBinarizer
+from tqdm import tqdm
+
+
+PIECE_VALUES = {
+    chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
+    chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0,
+}
+
+
+def _count_material(board, color):
+    return sum(
+        len(board.pieces(pt, color)) * PIECE_VALUES[pt]
+        for pt in [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]
+    )
+
+
+def _piece_mobility(board, piece_type, color):
+    return sum(
+        1 for m in board.legal_moves
+        if (p := board.piece_at(m.from_square)) and p.piece_type == piece_type and p.color == color
+    )
+
+
+def _attackers_near_king(board, king_color, attacking_color):
+    king_sq = board.king(king_color)
+    if king_sq is None:
+        return 0
+    kf, kr = chess.square_file(king_sq), chess.square_rank(king_sq)
+    count = 0
+    for df in (-1, 0, 1):
+        for dr in (-1, 0, 1):
+            f, r = kf + df, kr + dr
+            if 0 <= f <= 7 and 0 <= r <= 7:
+                count += len(board.attackers(attacking_color, chess.square(f, r)))
+    return count
+
+
+def _pawn_islands(board, color):
+    files = sorted({chess.square_file(sq) for sq in board.pieces(chess.PAWN, color)})
+    if not files:
+        return 0
+    return 1 + sum(1 for i in range(1, len(files)) if files[i] - files[i - 1] > 1)
+
+
+def _doubled_pawns(board, color):
+    fcounts = [0] * 8
+    for sq in board.pieces(chess.PAWN, color):
+        fcounts[chess.square_file(sq)] += 1
+    return sum(c - 1 for c in fcounts if c > 1)
+
+
+def _isolated_pawns(board, color):
+    pf = {chess.square_file(sq) for sq in board.pieces(chess.PAWN, color)}
+    return sum(1 for sq in board.pieces(chess.PAWN, color)
+               if (f := chess.square_file(sq)) and (f - 1) not in pf and (f + 1) not in pf)
+
+
+def _passed_pawns(board, color):
+    opp = not color
+    direction = 1 if color == chess.WHITE else -1
+    count = 0
+    for sq in board.pieces(chess.PAWN, color):
+        f, r = chess.square_file(sq), chess.square_rank(sq)
+        is_passed = True
+        for cf in (f - 1, f, f + 1):
+            if 0 <= cf <= 7:
+                cr = r + direction
+                while 0 <= cr <= 7:
+                    p = board.piece_at(chess.square(cf, cr))
+                    if p and p.piece_type == chess.PAWN and p.color == opp:
+                        is_passed = False
+                        break
+                    cr += direction
+                if not is_passed:
+                    break
+        if is_passed:
+            count += 1
+    return count
+
+
+def _undefended_pieces(board, color):
+    cnt, val = 0, 0
+    for pt in [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]:
+        for sq in board.pieces(pt, color):
+            if not board.attackers(color, sq):
+                cnt += 1
+                val += PIECE_VALUES[pt]
+    return cnt, val
+
+
+def _over_under_defended(board, color):
+    opp = not color
+    over, under = 0, 0
+    for pt in [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]:
+        for sq in board.pieces(pt, color):
+            d = len(board.attackers(color, sq))
+            a = len(board.attackers(opp, sq))
+            if d > a and a > 0:
+                over += 1
+            elif a > d:
+                under += 1
+    return over, under
+
+
+def _extract_position_features(board, move, side):
+    f = {}
+    legal = list(board.legal_moves)
+    f['num_legal_moves'] = len(legal)
+    f['in_check'] = int(board.is_check())
+
+    chk_moves = chk_pieces = cap_moves = cap_pieces = 0
+    win_caps = safe_caps = 0
+    chk_set, cap_set = set(), set()
+    for lm in legal:
+        is_cap = board.is_capture(lm)
+        board.push(lm)
+        gives_check = board.is_check()
+        board.pop()
+        if gives_check:
+            chk_moves += 1
+            chk_set.add(lm.from_square)
+        if is_cap:
+            cap_moves += 1
+            cap_set.add(lm.from_square)
+            att = board.piece_at(lm.from_square)
+            vic = board.piece_at(lm.to_square)
+            if att and vic:
+                av, vv = PIECE_VALUES.get(att.piece_type, 0), PIECE_VALUES.get(vic.piece_type, 0)
+                if vv > av:
+                    win_caps += 1
+                if av <= vv:
+                    safe_caps += 1
+    f['num_checking_moves'] = chk_moves
+    f['num_checking_pieces'] = len(chk_set)
+    f['num_capturing_moves'] = cap_moves
+    f['num_capturing_pieces'] = len(cap_set)
+    f['captures_winning_material'] = win_caps
+    f['materially_safe_captures'] = safe_caps
+
+    if move is not None:
+        mp = board.piece_at(move.from_square)
+        board.push(move)
+        f['move_is_check'] = int(board.is_check())
+        board.pop()
+        f['moving_piece_mobility'] = sum(1 for lm in legal if lm.from_square == move.from_square)
+        cap = board.piece_at(move.to_square)
+        is_ep = board.is_capture(move) and cap is None
+        if cap:
+            f['captures_undefended'] = int(not board.attackers(cap.color, move.to_square))
+            f['material_gain'] = PIECE_VALUES.get(cap.piece_type, 0)
+        elif is_ep:
+            f['captures_undefended'] = 0
+            f['material_gain'] = PIECE_VALUES[chess.PAWN]
+        else:
+            f['captures_undefended'] = 0
+            f['material_gain'] = 0
+        f['piece_type'] = mp.piece_type if mp else 0
+        f['from_col'] = chess.square_file(move.from_square)
+        f['from_row'] = chess.square_rank(move.from_square)
+        f['to_col'] = chess.square_file(move.to_square)
+        f['to_row'] = chess.square_rank(move.to_square)
+    else:
+        for k in ('move_is_check', 'moving_piece_mobility', 'captures_undefended',
+                  'material_gain', 'piece_type', 'from_col', 'from_row', 'to_col', 'to_row'):
+            f[k] = 0
+
+    f['side_material'] = _count_material(board, side)
+    f['opp_material'] = _count_material(board, not side)
+    f['material_diff'] = f['side_material'] - f['opp_material']
+    for pt in (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING):
+        f[f'mobility_pt{pt}'] = _piece_mobility(board, pt, side)
+    uc, uv = _undefended_pieces(board, side)
+    f['undefended_count'] = uc
+    f['undefended_value'] = uv
+    ouc, ouv = _undefended_pieces(board, not side)
+    f['opp_undefended_count'] = ouc
+    f['opp_undefended_value'] = ouv
+    f['attackers_near_own_king'] = _attackers_near_king(board, side, not side)
+    f['defenders_near_own_king'] = _attackers_near_king(board, side, side)
+    f['attackers_near_opp_king'] = _attackers_near_king(board, not side, side)
+    f['defenders_near_opp_king'] = _attackers_near_king(board, not side, not side)
+
+    f['pawn_islands'] = _pawn_islands(board, side)
+    f['opp_pawn_islands'] = _pawn_islands(board, not side)
+    f['doubled_pawns'] = _doubled_pawns(board, side)
+    f['isolated_pawns'] = _isolated_pawns(board, side)
+    f['passed_pawns'] = _passed_pawns(board, side)
+    f['opp_doubled_pawns'] = _doubled_pawns(board, not side)
+    f['opp_isolated_pawns'] = _isolated_pawns(board, not side)
+    f['opp_passed_pawns'] = _passed_pawns(board, not side)
+
+    ov, un = _over_under_defended(board, side)
+    f['over_defended'] = ov
+    f['under_defended'] = un
+    oov, oun = _over_under_defended(board, not side)
+    f['opp_over_defended'] = oov
+    f['opp_under_defended'] = oun
+    f['castle_K_white'] = int(board.has_kingside_castling_rights(chess.WHITE))
+    f['castle_Q_white'] = int(board.has_queenside_castling_rights(chess.WHITE))
+    f['castle_K_black'] = int(board.has_kingside_castling_rights(chess.BLACK))
+    f['castle_Q_black'] = int(board.has_queenside_castling_rights(chess.BLACK))
+    f['has_en_passant'] = int(board.has_legal_en_passant())
+    return f
+
+
+def _extract_tactical_features(board, move, prev_move, prev_board):
+    if move is None:
+        return {'accepted_sacrifice': 0, 'interposition_defence': 0, 'recapture': 0}
+    f = {}
+    if board.is_capture(move) and prev_move is not None and prev_move.to_square == move.to_square:
+        f['accepted_sacrifice'] = 1
+    else:
+        f['accepted_sacrifice'] = 0
+    mp = board.piece_at(move.from_square)
+    if board.is_check() and mp and mp.piece_type != chess.KING and not board.is_capture(move):
+        f['interposition_defence'] = 1
+    else:
+        f['interposition_defence'] = 0
+    if prev_move and prev_board and prev_board.is_capture(prev_move) and \
+       board.is_capture(move) and move.to_square == prev_move.to_square:
+        f['recapture'] = 1
+    else:
+        f['recapture'] = 0
+    return f
+
+
+def build_advanced_features(df, max_half_moves=10):
+    dummy_board = chess.Board()
+    dummy_move = list(dummy_board.legal_moves)[0]
+    sample_pos = _extract_position_features(dummy_board, dummy_move, chess.WHITE)
+    sample_tac = _extract_tactical_features(dummy_board, dummy_move, None, None)
+    feat_keys = list(sample_pos.keys()) + list(sample_tac.keys())
+    n_per_move = len(feat_keys)
+
+    col_names = []
+    for side_prefix in ('p', 'o'):
+        for i in range(5):
+            for k in feat_keys:
+                col_names.append(f"{side_prefix}{i}_{k}")
+    n_cols = len(col_names)
+
+    result = np.zeros((len(df), n_cols), dtype=np.float32)
+
+    for row_idx, (_, row) in enumerate(tqdm(df.iterrows(), total=len(df), desc="Move features")):
+        board = chess.Board(row['FEN'])
+        moves_uci = str(row['Moves']).split()
+        player_color = not board.turn
+
+        prev_move, prev_board = None, None
+        p_count, o_count = 0, 0
+
+        for move_uci in moves_uci[:max_half_moves]:
+            try:
+                move = chess.Move.from_uci(move_uci)
+            except Exception:
+                break
+
+            is_player = board.turn == player_color
+            if is_player:
+                if p_count >= 5:
+                    prev_board = board.copy()
+                    prev_move = move
+                    board.push(move)
+                    continue
+                prefix_idx = p_count
+                base_offset = prefix_idx * n_per_move
+                p_count += 1
+            else:
+                if o_count >= 5:
+                    prev_board = board.copy()
+                    prev_move = move
+                    board.push(move)
+                    continue
+                prefix_idx = o_count
+                base_offset = 5 * n_per_move + prefix_idx * n_per_move
+                o_count += 1
+
+            pos = _extract_position_features(board, move, board.turn)
+            tac = _extract_tactical_features(board, move, prev_move, prev_board)
+
+            vals = [pos[k] for k in sample_pos.keys()] + [tac[k] for k in sample_tac.keys()]
+            result[row_idx, base_offset:base_offset + n_per_move] = vals
+
+            prev_board = board.copy()
+            prev_move = move
+            board.push(move)
+
+    return result
+
+
+def extract_board_stats(fen):
+    board = chess.Board(fen)
+    return {
+        'white_pieces': int(board.occupied_co[chess.WHITE]).bit_count(),
+        'black_pieces': int(board.occupied_co[chess.BLACK]).bit_count(),
+        'material_balance': sum(len(board.pieces(piece, chess.WHITE)) * val
+                                for piece, val in zip([1, 2, 3, 4, 5, 6], [1, 3, 3, 5, 9, 0])) -
+                            sum(len(board.pieces(piece, chess.BLACK)) * val
+                                for piece, val in zip([1, 2, 3, 4, 5, 6], [1, 3, 3, 5, 9, 0]))
+    }
+
+
+def build_features(df):
+    feats = pd.DataFrame(index=df.index)
+    feats['SolutionLength'] = df['Moves'].apply(lambda x: len(str(x).split()))
+    feats['IsWhiteToMove'] = df['FEN'].apply(lambda x: 1 if x.split()[1] == 'w' else 0)
+    stats = df['FEN'].apply(extract_board_stats).apply(pd.Series)
+    feats = pd.concat([feats, stats], axis=1)
+    prob_cols = [c for c in df.columns if 'success_prob_blitz' in c]
+    feats = pd.concat([feats, df[prob_cols]], axis=1)
+
+    length = feats.pop('SolutionLength').values
+    return feats.values.astype(np.float32), length
+
+
+def encode_themes(df, themes_csv_path="./data/p200k_themes.csv"):
+    themes_df = pd.read_csv(themes_csv_path, usecols=["PuzzleId", "Themes"])
+    merged = df[["PuzzleId"]].merge(themes_df, on="PuzzleId", how="left")
+    merged["Themes"] = merged["Themes"].fillna("")
+    themes_list = merged["Themes"].apply(lambda x: x.split() if x else [])
+    mlb = MultiLabelBinarizer()
+    themes_encoded = mlb.fit_transform(themes_list)
+    return themes_encoded.astype(np.float32)

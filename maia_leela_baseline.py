@@ -7,7 +7,9 @@ from sklearn.model_selection import train_test_split
 import pandas as pd
 import mlflow
 
-from dataset import load_data, build_features, encode_themes, ChessPuzzleDataset
+from dataset.loaders import load_data
+from dataset.board_features import build_features, encode_themes
+from dataset.torch_dataset import ChessPuzzleDataset
 from MlpModel import PuzzleRatingMLP
 
 

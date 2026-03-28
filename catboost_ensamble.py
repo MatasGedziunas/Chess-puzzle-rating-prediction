@@ -7,7 +7,7 @@ import mlflow
 from catboost import CatBoostRegressor, Pool
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
-from dataset import build_features, encode_themes
+from dataset.board_features import build_features, encode_themes
 
 def prepare_features(X_struct, X_themes, move_lengths, stockfish_features=None):
     lengths_2d = move_lengths.reshape(-1, 1).astype(np.float32)
