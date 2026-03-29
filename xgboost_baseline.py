@@ -141,7 +141,8 @@ if __name__ == "__main__":
         stockfish_features = stockfish_features[:n]
     y = y[:n]
 
-    advanced_features = build_advanced_features(df)
+    data_file_name = os.path.splitext(os.path.basename(csv_path))[0]
+    advanced_features = build_advanced_features(df, data_file_name)
 
     X = prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths, advanced_features, stockfish_features)
     print(f"Total feature dimension: {X.shape[1]}")

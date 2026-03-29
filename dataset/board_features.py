@@ -1,3 +1,4 @@
+import os
 import chess
 import numpy as np
 import pandas as pd
@@ -228,7 +229,12 @@ def _extract_tactical_features(board, move, prev_move, prev_board):
     return f
 
 
-def build_advanced_features(df, max_half_moves=10):
+def build_advanced_features(df, data_file_name, max_half_moves=10):
+    cache_path = os.path.join(os.path.dirname(__file__), '..', 'data', f'{data_file_name}_advanced_features.csv')
+    cache_path = os.path.normpath(cache_path)
+    if os.path.exists(cache_path):
+        return pd.read_csv(cache_path).values.astype(np.float32)
+
     dummy_board = chess.Board()
     dummy_move = list(dummy_board.legal_moves)[0]
     sample_pos = _extract_position_features(dummy_board, dummy_move, chess.WHITE)
@@ -289,6 +295,7 @@ def build_advanced_features(df, max_half_moves=10):
             prev_move = move
             board.push(move)
 
+    pd.DataFrame(result, columns=col_names).to_csv(cache_path, index=False)
     return result
 
 
