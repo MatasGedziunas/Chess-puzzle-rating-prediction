@@ -151,6 +151,9 @@ if __name__ == "__main__":
 
     print(f"\nTraining {args.model_type} with {len(X_train)} train / {len(X_val)} val samples")
 
+    model_params = {}
+    interrupted = False
+
     with mlflow.start_run():
         mlflow.log_param("model_type", args.model_type)
         mlflow.log_param("min_rating", args.min_rating)
@@ -159,13 +162,24 @@ if __name__ == "__main__":
         mlflow.log_param("num_train", len(X_train))
         mlflow.log_param("num_val", len(X_val))
 
-        if args.model_type == "xgboost":
-            model, model_params = train_xgboost(X_train, y_train, X_val, y_val)
-        else:
-            model, model_params = train_lightgbm(X_train, y_train, X_val, y_val)
+        try:
+            if args.model_type == "xgboost":
+                model, model_params = train_xgboost(X_train, y_train, X_val, y_val)
+            else:
+                model, model_params = train_lightgbm(X_train, y_train, X_val, y_val)
+        except KeyboardInterrupt:
+            interrupted = True
+            print("\nTraining interrupted. Saving partial results...")
 
         for k, v in model_params.items():
             mlflow.log_param(k, v)
+
+        if interrupted:
+            mlflow.log_param("interrupted", True)
+
+        suffix = ""
+        if args.min_rating is not None or args.max_rating is not None:
+            suffix = f"_{args.min_rating or 'min'}to{args.max_rating or 'max'}"
 
         val_preds = model.predict(X_val)
         val_mse = mean_squared_error(y_val, val_preds)
@@ -180,13 +194,10 @@ if __name__ == "__main__":
         mlflow.log_metric("train_rmse", train_rmse)
         mlflow.log_metric("val_rmse", val_rmse)
 
-        print(f"\nTraining complete.")
+        status = "interrupted" if interrupted else "complete"
+        print(f"\nTraining {status}.")
         print(f"  Train MSE: {train_mse:.2f} (RMSE: {train_rmse:.2f})")
         print(f"  Val   MSE: {val_mse:.2f} (RMSE: {val_rmse:.2f})")
-
-        suffix = ""
-        if args.min_rating is not None or args.max_rating is not None:
-            suffix = f"_{args.min_rating or 'min'}to{args.max_rating or 'max'}"
 
         if args.model_type == "xgboost":
             mlflow.xgboost.log_model(model, f"model{suffix}")
@@ -199,6 +210,7 @@ if __name__ == "__main__":
             'Model': args.model_type,
             'Min_Rating': args.min_rating,
             'Max_Rating': args.max_rating,
+            'Interrupted': interrupted,
             'Validation_MSE': val_mse,
             'Validation_RMSE': val_rmse,
             'Train_MSE': train_mse,
