@@ -299,6 +299,65 @@ def build_advanced_features(df, data_file_name, max_half_moves=10):
     return result
 
 
+def _chebyshev(sq1, sq2):
+    return max(abs(chess.square_file(sq1) - chess.square_file(sq2)),
+               abs(chess.square_rank(sq1) - chess.square_rank(sq2)))
+
+
+def _piece_participation_stats(fen, moves_str):
+    board = chess.Board(fen)
+    moves_uci = str(moves_str).split()
+    player_color = not board.turn
+
+    player_from_squares = []
+    player_piece_types = set()
+    player_move_distances = []
+
+    for move_uci in moves_uci:
+        try:
+            move = chess.Move.from_uci(move_uci)
+        except Exception:
+            break
+        if board.turn == player_color:
+            piece = board.piece_at(move.from_square)
+            if piece:
+                player_piece_types.add(piece.piece_type)
+                player_from_squares.append(move.from_square)
+                player_move_distances.append(_chebyshev(move.from_square, move.to_square))
+        board.push(move)
+
+    num_pieces = len(set(player_from_squares))
+    num_piece_types = len(player_piece_types)
+    max_piece_value = max((PIECE_VALUES.get(pt, 0) for pt in player_piece_types), default=0)
+    uses_queen = int(chess.QUEEN in player_piece_types)
+    uses_rook = int(chess.ROOK in player_piece_types)
+    uses_minor = int(chess.KNIGHT in player_piece_types or chess.BISHOP in player_piece_types)
+    uses_pawn = int(chess.PAWN in player_piece_types)
+    avg_move_dist = float(np.mean(player_move_distances)) if player_move_distances else 0.0
+
+    if len(player_from_squares) >= 2:
+        origin_distances = [
+            _chebyshev(player_from_squares[i], player_from_squares[j])
+            for i in range(len(player_from_squares))
+            for j in range(i + 1, len(player_from_squares))
+        ]
+        spatial_spread = float(np.mean(origin_distances))
+    else:
+        spatial_spread = 0.0
+
+    return {
+        'num_participating_pieces': num_pieces,
+        'num_piece_types': num_piece_types,
+        'max_piece_value': max_piece_value,
+        'uses_queen': uses_queen,
+        'uses_rook': uses_rook,
+        'uses_minor': uses_minor,
+        'uses_pawn': uses_pawn,
+        'avg_move_dist': avg_move_dist,
+        'spatial_spread': spatial_spread,
+    }
+
+
 def extract_board_stats(fen):
     board = chess.Board(fen)
     return {
@@ -319,6 +378,8 @@ def build_features(df):
     feats = pd.concat([feats, stats], axis=1)
     prob_cols = [c for c in df.columns if 'success_prob_blitz' in c or 'success_prob_rapid' in c]
     feats = pd.concat([feats, df[prob_cols]], axis=1)
+    participation = df.apply(lambda r: _piece_participation_stats(r['FEN'], r['Moves']), axis=1).apply(pd.Series)
+    feats = pd.concat([feats, participation], axis=1)
 
     length = feats.pop('SolutionLength').values
     return feats.values.astype(np.float32), length
