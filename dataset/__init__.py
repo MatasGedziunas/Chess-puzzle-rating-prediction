@@ -3,6 +3,7 @@ from .board_features import (
     build_features,
     encode_themes,
     build_advanced_features,
+    build_success_prob_features,
     extract_board_stats,
     PIECE_VALUES,
 )

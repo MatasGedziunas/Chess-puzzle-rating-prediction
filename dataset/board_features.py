@@ -317,11 +317,39 @@ def build_features(df):
     feats['IsWhiteToMove'] = df['FEN'].apply(lambda x: 1 if x.split()[1] == 'w' else 0)
     stats = df['FEN'].apply(extract_board_stats).apply(pd.Series)
     feats = pd.concat([feats, stats], axis=1)
-    prob_cols = [c for c in df.columns if 'success_prob_blitz' in c]
+    prob_cols = [c for c in df.columns if 'success_prob_blitz' in c or 'success_prob_rapid' in c]
     feats = pd.concat([feats, df[prob_cols]], axis=1)
 
     length = feats.pop('SolutionLength').values
     return feats.values.astype(np.float32), length
+
+
+def build_success_prob_features(df):
+    prob_cols = sorted([c for c in df.columns if 'success_prob_' in c])
+    if not prob_cols:
+        return np.zeros((len(df), 0), dtype=np.float32)
+
+    probs = df[prob_cols].fillna(0).values.astype(np.float32)
+
+    prob_mean = probs.mean(axis=1)
+    prob_std = probs.std(axis=1)
+    prob_min = probs.min(axis=1)
+    prob_max = probs.max(axis=1)
+    prob_range = prob_max - prob_min
+
+    from scipy.stats import skew
+    prob_skew = np.array([skew(row) for row in probs]).astype(np.float32)
+
+    pairwise_diffs = np.diff(probs, axis=1)
+    second_deriv = np.diff(probs, n=2, axis=1)
+    inflection_idx = np.argmin(second_deriv, axis=1).astype(np.float32)
+    max_pairwise_drop = pairwise_diffs.min(axis=1)
+
+    derived = np.column_stack([
+        prob_mean, prob_std, prob_min, prob_max, prob_range,
+        prob_skew, inflection_idx, max_pairwise_drop,
+    ]).astype(np.float32)
+    return derived
 
 
 def encode_themes(df, themes_csv_path="./data/p200k_themes.csv"):

@@ -9,16 +9,16 @@ import pandas as pd
 import mlflow
 
 from dataset.loaders import load_data
-from dataset.board_features import build_features, encode_themes, build_advanced_features
+from dataset.board_features import build_features, encode_themes, build_advanced_features, build_success_prob_features
 
 
 def flatten_maia_embeddings(maia_seq):
     return maia_seq.mean(axis=1)
 
 
-def prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths, advanced_features, stockfish_features=None):
+def prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths, advanced_features, success_prob_features, stockfish_features=None):
     lengths_2d = move_lengths.reshape(-1, 1).astype(np.float32)
-    parts = [X_struct, X_themes, lengths_2d, advanced_features]
+    parts = [X_struct, X_themes, lengths_2d, advanced_features, success_prob_features]
     if maia_seq_flat is not None:
         parts.append(maia_seq_flat)
     if stockfish_features is not None:
@@ -39,7 +39,7 @@ def apply_rating_mask(mask, X_struct, X_themes, maia_seq_flat, move_lengths, sto
     return X_struct, X_themes, maia_seq_flat, move_lengths, stockfish_features, y, df
 
 
-def train_xgboost(X_train, y_train, X_val, y_val):
+def train_xgboost(X_train, y_train, X_val, y_val, sample_weights=None):
     params = {
         "n_estimators": 5000,
         "learning_rate": 0.1,
@@ -54,22 +54,16 @@ def train_xgboost(X_train, y_train, X_val, y_val):
         "verbosity": 1,
     }
     model = xgb.XGBRegressor(**params)
-    model.fit(X_train, y_train, eval_set=[(X_train, y_train), (X_val, y_val)], verbose=100)
+    model.fit(
+        X_train, y_train,
+        sample_weight=sample_weights,
+        eval_set=[(X_train, y_train), (X_val, y_val)],
+        verbose=100,
+    )
     return model, params
 
 
-def train_lightgbm(X_train, y_train, X_val, y_val):
-    # params = {
-    #     "n_estimators": 5000,
-    #     "learning_rate": 0.05,
-    #     "num_leaves": 63,
-    #     "min_child_samples": 20,
-    #     "objective": "regression",
-    #     "metric": "rmse",
-    #     "n_jobs": -1,
-    #     "random_state": 42,
-    #     "verbosity": -1,
-    # }
+def train_lightgbm(X_train, y_train, X_val, y_val, sample_weights=None):
     params = {
         "n_estimators": 5000,
         "learning_rate": 0.05,
@@ -85,6 +79,7 @@ def train_lightgbm(X_train, y_train, X_val, y_val):
     model = lgb.LGBMRegressor(**params)
     model.fit(
         X_train, y_train,
+        sample_weight=sample_weights,
         eval_set=[(X_train, y_train), (X_val, y_val)],
         callbacks=[
             lgb.early_stopping(stopping_rounds=50, verbose=True),
@@ -101,6 +96,8 @@ if __name__ == "__main__":
     parser.add_argument("--model_type", choices=["xgboost", "lightgbm"], default="lightgbm")
     parser.add_argument("--max_rows", type=int, default=200000)
     parser.add_argument("--use_maia_embeddings", action="store_true", default=False)
+    parser.add_argument("--filter_rating_deviation", action="store_true", default=True)
+    parser.add_argument("--use_sample_weights", action="store_true", default=False)
     args = parser.parse_args()
 
     csv_path = "./data/p200k.csv"
@@ -115,6 +112,10 @@ if __name__ == "__main__":
         stockfish_path,
         load_maia_embeddings=args.use_maia_embeddings,
     )
+
+    if args.filter_rating_deviation and 'RatingDeviation' in df.columns:
+        df = df[df['RatingDeviation'] <= 90].reset_index(drop=True)
+
     X_struct, move_lengths = build_features(df)
     X_themes = encode_themes(df, themes_csv_path="./data/p200k_themes.csv")
     maia_seq_flat = flatten_maia_embeddings(maia_seq) if args.use_maia_embeddings else None
@@ -141,10 +142,16 @@ if __name__ == "__main__":
         stockfish_features = stockfish_features[:n]
     y = y[:n]
 
+    rating_deviation = df['RatingDeviation'].values[:n].astype(np.float32) if 'RatingDeviation' in df.columns else None
+    sample_weights = None
+    if args.use_sample_weights and rating_deviation is not None:
+        sample_weights = (1.0 / np.maximum(rating_deviation, 1.0)).astype(np.float32) 
+
     data_file_name = os.path.splitext(os.path.basename(csv_path))[0]
     advanced_features = build_advanced_features(df, data_file_name)
+    success_prob_features = build_success_prob_features(df)
 
-    X = prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths, advanced_features, stockfish_features)
+    X = prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths, advanced_features, success_prob_features, stockfish_features)
     print(f"Total feature dimension: {X.shape[1]}")
     print(f"  Struct features:    {X_struct.shape[1]}")
     print(f"  Theme features:     {X_themes.shape[1]}")
@@ -153,6 +160,7 @@ if __name__ == "__main__":
     else:
         print(f"  Maia embeddings:    disabled")
     print(f"  Advanced features:  {advanced_features.shape[1]}")
+    print(f"  Success prob stats: {success_prob_features.shape[1]}")
     print(f"  Length feature:     1")
     if stockfish_features is not None:
         print(f"  Stockfish features: {stockfish_features.shape[1]}")
@@ -171,15 +179,17 @@ if __name__ == "__main__":
         mlflow.log_param("model_type", args.model_type)
         mlflow.log_param("min_rating", args.min_rating)
         mlflow.log_param("max_rating", args.max_rating)
+        mlflow.log_param("filter_rating_deviation", args.filter_rating_deviation)
+        mlflow.log_param("use_sample_weights", args.use_sample_weights)
         mlflow.log_param("num_features", X.shape[1])
         mlflow.log_param("num_train", len(X_train))
         mlflow.log_param("num_val", len(X_val))
 
         try:
             if args.model_type == "xgboost":
-                model, model_params = train_xgboost(X_train, y_train, X_val, y_val)
+                model, model_params = train_xgboost(X_train, y_train, X_val, y_val, sample_weights[train_idx] if sample_weights is not None else None)
             else:
-                model, model_params = train_lightgbm(X_train, y_train, X_val, y_val)
+                model, model_params = train_lightgbm(X_train, y_train, X_val, y_val, sample_weights[train_idx] if sample_weights is not None else None)
         except KeyboardInterrupt:
             interrupted = True
             print("\nTraining interrupted. Saving partial results...")
