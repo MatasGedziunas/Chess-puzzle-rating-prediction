@@ -59,6 +59,17 @@ def train_xgboost(X_train, y_train, X_val, y_val):
 
 
 def train_lightgbm(X_train, y_train, X_val, y_val):
+    # params = {
+    #     "n_estimators": 5000,
+    #     "learning_rate": 0.05,
+    #     "num_leaves": 63,
+    #     "min_child_samples": 20,
+    #     "objective": "regression",
+    #     "metric": "rmse",
+    #     "n_jobs": -1,
+    #     "random_state": 42,
+    #     "verbosity": -1,
+    # }
     params = {
         "n_estimators": 5000,
         "learning_rate": 0.05,
@@ -66,16 +77,17 @@ def train_lightgbm(X_train, y_train, X_val, y_val):
         "min_child_samples": 20,
         "objective": "regression",
         "metric": "rmse",
-        "n_jobs": -1,
         "random_state": 42,
         "verbosity": -1,
+        "device": "cuda",
+        "max_bin": 255,
     }
     model = lgb.LGBMRegressor(**params)
     model.fit(
         X_train, y_train,
         eval_set=[(X_train, y_train), (X_val, y_val)],
         callbacks=[
-            lgb.early_stopping(stopping_rounds=100, verbose=True),
+            lgb.early_stopping(stopping_rounds=50, verbose=True),
             lgb.log_evaluation(period=100),
         ],
     )
@@ -202,7 +214,7 @@ if __name__ == "__main__":
         if args.model_type == "xgboost":
             mlflow.xgboost.log_model(model, f"model{suffix}")
         else:
-            mlflow.lightgbm.log_model(model, f"model{suffix}")
+            mlflow.lightgbm.log_model(model, f"model{suffix}Cuda")
 
         out_dir = "./results/p200k"
         os.makedirs(out_dir, exist_ok=True)
@@ -215,4 +227,4 @@ if __name__ == "__main__":
             'Validation_RMSE': val_rmse,
             'Train_MSE': train_mse,
             'Train_RMSE': train_rmse,
-        }]).to_csv(f"{out_dir}/{args.model_type}_results{suffix}.csv", index=False)
+        }]).to_csv(f"{out_dir}/{args.model_type}_results{suffix}_withCuda.csv", index=False)
