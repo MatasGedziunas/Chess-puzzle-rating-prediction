@@ -31,7 +31,7 @@ def load_data(csv_path, embeddings_path=None, stockfish_path=None, num_rows=None
     if stockfish_path:
         sf_df = pd.read_csv(stockfish_path)
         df = df.merge(sf_df, on='PuzzleId', how='left')
-        sf_cols = ['SF_Material', 'SF_Positional', 'SF_Final_Eval']
+        sf_cols = ['SF_Material', 'SF_Positional', 'SF_Final_Eval', 'SF_Last_Move_CP']
         stockfish_features = df[sf_cols].fillna(0).values.astype(np.float32)
     else:
         stockfish_features = None

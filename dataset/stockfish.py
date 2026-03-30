@@ -14,11 +14,50 @@ def _fen_after_first_move(fen, moves_str):
     return board.fen()
 
 
+def _fen_after_all_moves(fen, moves_str):
+    board = chess.Board(fen)
+    for move in moves_str.strip().split():
+        board.push_uci(move)
+    return board.fen()
+
+
+def _search_centipawn(stockfish_path, fen, depth=15):
+    process = subprocess.Popen(
+        [stockfish_path],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+    process.stdin.write(f"position fen {fen}\ngo depth {depth}\n")
+    process.stdin.flush()
+
+    cp_value = None
+    for line in process.stdout:
+        line = line.strip()
+        if 'score cp' in line:
+            match = re.search(r'score cp (-?\d+)', line)
+            if match:
+                cp_value = int(match.group(1))
+        elif 'score mate' in line:
+            match = re.search(r'score mate (-?\d+)', line)
+            if match:
+                mate_in = int(match.group(1))
+                cp_value = 10000 if mate_in > 0 else -10000
+        elif line.startswith('bestmove'):
+            break
+
+    process.stdin.write("quit\n")
+    process.stdin.flush()
+    process.wait()
+    return cp_value
+
 def get_stockfish_features(row):
     STOCKFISH_PATH = "./stockfish/stockfish"
     puzzle_id, fen, moves = row['PuzzleId'], row['FEN'], row['Moves']
 
     eval_fen = _fen_after_first_move(fen, moves)
+    last_fen = _fen_after_all_moves(fen, moves)
 
     process = subprocess.Popen(
         [STOCKFISH_PATH],
@@ -35,39 +74,12 @@ def get_stockfish_features(row):
         "PuzzleId": puzzle_id,
         "SF_Material": None,
         "SF_Positional": None,
-        "SF_Final_Eval": None
+        "SF_Final_Eval": None,
+        "SF_Last_Move_CP": None,
     }
 
     if "Final evaluation: none (in check)" in output:
-        process2 = subprocess.Popen(
-            [STOCKFISH_PATH],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-
-        process2.stdin.write(f"position fen {eval_fen}\ngo depth 10\n")
-        process2.stdin.flush()
-
-        for line in process2.stdout:
-            line = line.strip()
-            if 'score cp' in line:
-                match = re.search(r'score cp (-?\d+)', line)
-                if match:
-                    metrics["SF_Final_Eval"] = int(match.group(1)) / 100.0
-            elif 'score mate' in line:
-                match = re.search(r'score mate (-?\d+)', line)
-                if match:
-                    mate_in = int(match.group(1))
-                    metrics["SF_Final_Eval"] = 100.0 if mate_in > 0 else -100.0
-            elif line.startswith('bestmove'):
-                break
-
-        process2.stdin.write("quit\n")
-        process2.stdin.flush()
-        process2.wait()
-
+        metrics["SF_Final_Eval"] = _search_centipawn(STOCKFISH_PATH, eval_fen, depth=1)
     else:
         lines = output.split('\n')
         for line in lines:
@@ -84,6 +96,8 @@ def get_stockfish_features(row):
                 match = re.search(r"([+-]?\d+\.\d+)", line)
                 if match:
                     metrics["SF_Final_Eval"] = float(match.group(1))
+
+    metrics["SF_Last_Move_CP"] = _search_centipawn(STOCKFISH_PATH, last_fen)
 
     return metrics
 
