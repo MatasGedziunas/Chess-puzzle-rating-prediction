@@ -3,13 +3,22 @@ import re
 import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+import chess
 import pandas as pd
 from tqdm import tqdm
 
 
+def _fen_after_first_move(fen, moves_str):
+    board = chess.Board(fen)
+    board.push_uci(moves_str.strip().split()[0])
+    return board.fen()
+
+
 def get_stockfish_features(row):
-    STOCKFISH_PATH = "./stockfish"
-    puzzle_id, fen = row['PuzzleId'], row['FEN']
+    STOCKFISH_PATH = "./stockfish/stockfish"
+    puzzle_id, fen, moves = row['PuzzleId'], row['FEN'], row['Moves']
+
+    eval_fen = _fen_after_first_move(fen, moves)
 
     process = subprocess.Popen(
         [STOCKFISH_PATH],
@@ -19,7 +28,7 @@ def get_stockfish_features(row):
         text=True
     )
 
-    commands = f"position fen {fen}\neval\nquit\n"
+    commands = f"position fen {eval_fen}\neval\nquit\n"
     output, _ = process.communicate(commands)
 
     metrics = {
@@ -38,7 +47,7 @@ def get_stockfish_features(row):
             text=True
         )
 
-        process2.stdin.write(f"position fen {fen}\ngo depth 10\n")
+        process2.stdin.write(f"position fen {eval_fen}\ngo depth 10\n")
         process2.stdin.flush()
 
         for line in process2.stdout:
@@ -90,7 +99,7 @@ def process_all_puzzles(input_csv, output_csv, max_workers=8):
         already_processed = set(done_df['PuzzleId'].tolist())
         existing_results = done_df.to_dict('records')
 
-    tasks = df[~df['PuzzleId'].isin(already_processed)][['PuzzleId', 'FEN']].to_dict('records')
+    tasks = df[~df['PuzzleId'].isin(already_processed)][['PuzzleId', 'FEN', 'Moves']].to_dict('records')
     if len(tasks) == 0:
         return
 
