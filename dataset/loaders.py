@@ -7,7 +7,7 @@ from pathlib import Path
 from .maia2_embeddings import process_puzzle_sequences
 
 
-def load_data(csv_path, embeddings_path=None, stockfish_path=None, num_rows=None, load_maia_embeddings=True):
+def load_data(csv_path, embeddings_path=None, stockfish_path=None, num_rows=None, load_maia_embeddings=False):
     df = pd.read_csv(csv_path)
     if num_rows:
         df = df.head(num_rows)

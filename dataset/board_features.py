@@ -370,9 +370,16 @@ def extract_board_stats(fen):
     }
 
 
-def build_features(df):
+def build_features(df, save_csv_path=None):
+    length = df['Moves'].apply(lambda x: len(str(x).split())).values
+
+    if save_csv_path is not None and os.path.exists(save_csv_path):
+        cached = pd.read_csv(save_csv_path)
+        if len(cached) == len(df):
+            return cached.values.astype(np.float32), length
+
     feats = pd.DataFrame(index=df.index)
-    feats['SolutionLength'] = df['Moves'].apply(lambda x: len(str(x).split()))
+    feats['SolutionLength'] = length
     feats['IsWhiteToMove'] = df['FEN'].apply(lambda x: 1 if x.split()[1] == 'w' else 0)
     stats = df['FEN'].apply(extract_board_stats).apply(pd.Series)
     feats = pd.concat([feats, stats], axis=1)
@@ -382,6 +389,8 @@ def build_features(df):
     feats = pd.concat([feats, participation], axis=1)
 
     length = feats.pop('SolutionLength').values
+    if save_csv_path is not None:
+        feats.to_csv(save_csv_path, index=False)
     return feats.values.astype(np.float32), length
 
 

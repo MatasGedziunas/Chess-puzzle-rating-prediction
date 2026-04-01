@@ -238,4 +238,4 @@ if __name__ == "__main__":
             'Validation_RMSE': val_rmse,
             'Train_MSE': train_mse,
             'Train_RMSE': train_rmse,
-        }]).to_csv(f"{out_dir}/{args.model_type}_results{suffix}_withCuda.csv", index=False)
+        }]).to_csv(f"{out_dir}/{args.model_type}_results{suffix}_withPieceParticipation.csv", index=False)

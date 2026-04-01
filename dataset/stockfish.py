@@ -104,7 +104,7 @@ def get_stockfish_features(row):
 
 def process_all_puzzles(input_csv, output_csv, max_workers=8):
     df = pd.read_csv(input_csv)
-
+    
     already_processed = set()
     existing_results = []
     if os.path.exists(output_csv):
@@ -120,13 +120,17 @@ def process_all_puzzles(input_csv, output_csv, max_workers=8):
     new_results = []
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(get_stockfish_features, row): row for row in tasks}
-
+        i = 0
         for future in tqdm(as_completed(futures), total=len(tasks), desc="Processing Puzzles"):
             try:
                 res = future.result()
                 new_results.append(res)
             except Exception:
                 pass
+            i += 1
+            if i % 10000 == 0:
+                all_results = existing_results + new_results
+                pd.DataFrame(all_results).to_csv(output_csv, index=False)
 
     all_results = existing_results + new_results
     pd.DataFrame(all_results).to_csv(output_csv, index=False)
