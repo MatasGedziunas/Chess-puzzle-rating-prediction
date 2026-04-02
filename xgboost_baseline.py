@@ -98,9 +98,9 @@ if __name__ == "__main__":
     parser.add_argument("--use_sample_weights", action="store_true", default=False)
     args = parser.parse_args()
 
-    csv_path = "./data/p200k.csv"
+    csv_path = "../filtered.csv"
     embeddings_path = "./data/p200k/maia2.npy" if args.use_maia_embeddings else None
-    stockfish_path = "./data/p200k_sf_evals.csv"
+    stockfish_path = "../filtered_sf_evals.csv"
 
     mlflow.set_experiment("Chess_Puzzle_Rating_Prediction")
 
@@ -115,7 +115,7 @@ if __name__ == "__main__":
         df = df[df['RatingDeviation'] <= 90].reset_index(drop=True)
 
     X_struct = build_features(df)
-    X_themes = encode_themes(df, themes_csv_path="./data/p200k_themes.csv")
+    X_themes = encode_themes(df, themes_csv_path="../filtered_themes_only.csv")
     maia_seq_flat = flatten_maia_embeddings(maia_seq) if args.use_maia_embeddings else None
     y = df['Rating'].values
 
@@ -222,9 +222,9 @@ if __name__ == "__main__":
         if args.model_type == "xgboost":
             mlflow.xgboost.log_model(model, f"model{suffix}")
         else:
-            mlflow.lightgbm.log_model(model, f"model{suffix}Cuda")
+            mlflow.lightgbm.log_model(model, f"model{suffix}Filtered")
 
-        out_dir = "./results/p200k"
+        out_dir = "./results/filtered"
         os.makedirs(out_dir, exist_ok=True)
         pd.DataFrame([{
             'Model': args.model_type,
@@ -235,4 +235,4 @@ if __name__ == "__main__":
             'Validation_RMSE': val_rmse,
             'Train_MSE': train_mse,
             'Train_RMSE': train_rmse,
-        }]).to_csv(f"{out_dir}/{args.model_type}_results{suffix}_withPieceParticipation.csv", index=False)
+        }]).to_csv(f"{out_dir}/{args.model_type}_results{suffix}.csv", index=False)
