@@ -16,9 +16,8 @@ def flatten_maia_embeddings(maia_seq):
     return maia_seq.mean(axis=1)
 
 
-def prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths, advanced_features, success_prob_features, stockfish_features=None):
-    lengths_2d = move_lengths.reshape(-1, 1).astype(np.float32)
-    parts = [X_struct, X_themes, lengths_2d, advanced_features, success_prob_features]
+def prepare_features(X_struct, X_themes, maia_seq_flat, advanced_features, success_prob_features, stockfish_features=None):
+    parts = [X_struct, X_themes, advanced_features, success_prob_features]
     if maia_seq_flat is not None:
         parts.append(maia_seq_flat)
     if stockfish_features is not None:
@@ -26,17 +25,16 @@ def prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths, advanced_f
     return np.concatenate(parts, axis=1)
 
 
-def apply_rating_mask(mask, X_struct, X_themes, maia_seq_flat, move_lengths, stockfish_features, y, df):
+def apply_rating_mask(mask, X_struct, X_themes, maia_seq_flat, stockfish_features, y, df):
     X_struct = X_struct[mask]
     X_themes = X_themes[mask]
     if maia_seq_flat is not None:
         maia_seq_flat = maia_seq_flat[mask]
-    move_lengths = move_lengths[mask]
     if stockfish_features is not None:
         stockfish_features = stockfish_features[mask]
     y = y[mask]
     df = df[mask].reset_index(drop=True)
-    return X_struct, X_themes, maia_seq_flat, move_lengths, stockfish_features, y, df
+    return X_struct, X_themes, maia_seq_flat, stockfish_features, y, df
 
 
 def train_xgboost(X_train, y_train, X_val, y_val, sample_weights=None):
@@ -116,7 +114,7 @@ if __name__ == "__main__":
     if args.filter_rating_deviation and 'RatingDeviation' in df.columns:
         df = df[df['RatingDeviation'] <= 90].reset_index(drop=True)
 
-    X_struct, move_lengths = build_features(df)
+    X_struct = build_features(df)
     X_themes = encode_themes(df, themes_csv_path="./data/p200k_themes.csv")
     maia_seq_flat = flatten_maia_embeddings(maia_seq) if args.use_maia_embeddings else None
     y = df['Rating'].values
@@ -127,8 +125,8 @@ if __name__ == "__main__":
     if args.max_rating is not None:
         mask &= (y < args.max_rating)
 
-    X_struct, X_themes, maia_seq_flat, move_lengths, stockfish_features, y, df = apply_rating_mask(
-        mask, X_struct, X_themes, maia_seq_flat, move_lengths, stockfish_features, y, df
+    X_struct, X_themes, maia_seq_flat, stockfish_features, y, df = apply_rating_mask(
+        mask, X_struct, X_themes, maia_seq_flat, stockfish_features, y, df
     )
 
     df = df.head(args.max_rows)
@@ -137,7 +135,6 @@ if __name__ == "__main__":
     X_themes = X_themes[:n]
     if maia_seq_flat is not None:
         maia_seq_flat = maia_seq_flat[:n]
-    move_lengths = move_lengths[:n]
     if stockfish_features is not None:
         stockfish_features = stockfish_features[:n]
     y = y[:n]
@@ -151,7 +148,7 @@ if __name__ == "__main__":
     advanced_features = build_advanced_features(df, data_file_name)
     success_prob_features = build_success_prob_features(df)
 
-    X = prepare_features(X_struct, X_themes, maia_seq_flat, move_lengths, advanced_features, success_prob_features, stockfish_features)
+    X = prepare_features(X_struct, X_themes, maia_seq_flat, advanced_features, success_prob_features, stockfish_features)
     print(f"Total feature dimension: {X.shape[1]}")
     print(f"  Struct features:    {X_struct.shape[1]}")
     print(f"  Theme features:     {X_themes.shape[1]}")
@@ -161,7 +158,7 @@ if __name__ == "__main__":
         print(f"  Maia embeddings:    disabled")
     print(f"  Advanced features:  {advanced_features.shape[1]}")
     print(f"  Success prob stats: {success_prob_features.shape[1]}")
-    print(f"  Length feature:     1")
+    print(f"  Length feature:     included in struct")
     if stockfish_features is not None:
         print(f"  Stockfish features: {stockfish_features.shape[1]}")
 

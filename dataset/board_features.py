@@ -371,27 +371,30 @@ def extract_board_stats(fen):
 
 
 def build_features(df, save_csv_path=None):
-    length = df['Moves'].apply(lambda x: len(str(x).split())).values
+    tqdm.pandas(desc="Solution length")
+    length = df['Moves'].progress_apply(lambda x: len(str(x).split())).values
 
     if save_csv_path is not None and os.path.exists(save_csv_path):
         cached = pd.read_csv(save_csv_path)
         if len(cached) == len(df):
-            return cached.values.astype(np.float32), length
+            return cached.values.astype(np.float32)
 
     feats = pd.DataFrame(index=df.index)
     feats['SolutionLength'] = length
-    feats['IsWhiteToMove'] = df['FEN'].apply(lambda x: 1 if x.split()[1] == 'w' else 0)
-    stats = df['FEN'].apply(extract_board_stats).apply(pd.Series)
+    tqdm.pandas(desc="Side to move")
+    feats['IsWhiteToMove'] = df['FEN'].progress_apply(lambda x: 1 if x.split()[1] == 'w' else 0)
+    tqdm.pandas(desc="Board stats")
+    stats = df['FEN'].progress_apply(extract_board_stats).apply(pd.Series)
     feats = pd.concat([feats, stats], axis=1)
     prob_cols = [c for c in df.columns if 'success_prob_blitz' in c or 'success_prob_rapid' in c]
     feats = pd.concat([feats, df[prob_cols]], axis=1)
-    participation = df.apply(lambda r: _piece_participation_stats(r['FEN'], r['Moves']), axis=1).apply(pd.Series)
+    tqdm.pandas(desc="Participation stats")
+    participation = df.progress_apply(lambda r: _piece_participation_stats(r['FEN'], r['Moves']), axis=1).apply(pd.Series)
     feats = pd.concat([feats, participation], axis=1)
 
-    length = feats.pop('SolutionLength').values
     if save_csv_path is not None:
         feats.to_csv(save_csv_path, index=False)
-    return feats.values.astype(np.float32), length
+    return feats.values.astype(np.float32)
 
 
 def build_success_prob_features(df):

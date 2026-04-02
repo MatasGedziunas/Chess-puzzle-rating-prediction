@@ -84,7 +84,8 @@ if __name__ == "__main__":
     mlflow.set_experiment("Chess_Puzzle_Rating_Prediction")
     
     df, maia_seq = load_data(csv_path, embeddings_path, num_rows=1000)
-    X_struct, move_lengths = build_features(df)
+    X_struct = build_features(df)
+    move_lengths = df['Moves'].apply(lambda x: len(str(x).split())).values
     X_themes = encode_themes(df)
     y = df['Rating'].values
     

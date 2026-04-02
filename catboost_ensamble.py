@@ -75,7 +75,8 @@ if __name__ == "__main__":
     
     y = df_holdout['Rating'].values
     
-    X_struct, move_lengths = build_features(df_holdout)
+    X_struct = build_features(df_holdout)
+    move_lengths = df_holdout['Moves'].apply(lambda x: len(str(x).split())).values
     X_themes = encode_themes(df_holdout)
     stockfish_features = './data/p200k_sf_evals.csv'  
     
