@@ -16,13 +16,19 @@ def flatten_maia_embeddings(maia_seq):
     return maia_seq.mean(axis=1)
 
 
-def prepare_features(X_struct, X_themes, maia_seq_flat, advanced_features, success_prob_features, stockfish_features=None):
+def prepare_features(X_struct, X_themes, maia_seq_flat, advanced_features, success_prob_features, stockfish_features=None, save_path=None):
+    if save_path is not None and os.path.exists(save_path):
+        return np.load(save_path)
+
     parts = [X_struct, X_themes, advanced_features, success_prob_features]
     if maia_seq_flat is not None:
         parts.append(maia_seq_flat)
     if stockfish_features is not None:
         parts.append(stockfish_features)
-    return np.concatenate(parts, axis=1)
+    X = np.concatenate(parts, axis=1)
+    if save_path is not None:
+        np.save(save_path, X)
+    return X
 
 
 def apply_rating_mask(mask, X_struct, X_themes, maia_seq_flat, stockfish_features, y, df):
@@ -47,7 +53,7 @@ def train_xgboost(X_train, y_train, X_val, y_val, sample_weights=None):
         "device": "cpu",
         "objective": "reg:squarederror",
         "eval_metric": "rmse",
-        "early_stopping_rounds": 50,
+        "early_stopping_rounds": 200,
         "random_state": 42,
         "verbosity": 1,
     }
@@ -114,7 +120,7 @@ if __name__ == "__main__":
     if args.filter_rating_deviation and 'RatingDeviation' in df.columns:
         df = df[df['RatingDeviation'] <= 90].reset_index(drop=True)
 
-    X_struct = build_features(df)
+    X_struct = build_features(df, "../filtered_struct_features.csv")
     X_themes = encode_themes(df, themes_csv_path="../filtered_themes_only.csv")
     maia_seq_flat = flatten_maia_embeddings(maia_seq) if args.use_maia_embeddings else None
     y = df['Rating'].values
@@ -129,7 +135,6 @@ if __name__ == "__main__":
         mask, X_struct, X_themes, maia_seq_flat, stockfish_features, y, df
     )
 
-    df = df.head(args.max_rows)
     n = len(df)
     X_struct = X_struct[:n]
     X_themes = X_themes[:n]
@@ -148,7 +153,15 @@ if __name__ == "__main__":
     advanced_features = build_advanced_features(df, data_file_name)
     success_prob_features = build_success_prob_features(df)
 
-    X = prepare_features(X_struct, X_themes, maia_seq_flat, advanced_features, success_prob_features, stockfish_features)
+    X = prepare_features(
+        X_struct,
+        X_themes,
+        maia_seq_flat,
+        advanced_features,
+        success_prob_features,
+        stockfish_features,
+        save_path="../filtered_combined_features.npy",
+    )
     print(f"Total feature dimension: {X.shape[1]}")
     print(f"  Struct features:    {X_struct.shape[1]}")
     print(f"  Theme features:     {X_themes.shape[1]}")
