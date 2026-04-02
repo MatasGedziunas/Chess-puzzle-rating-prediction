@@ -93,6 +93,13 @@ def train_lightgbm(X_train, y_train, X_val, y_val, sample_weights=None):
     return model, params
 
 
+def evaluate_model(model, X_eval, y_eval):
+    preds = model.predict(X_eval)
+    mse = mean_squared_error(y_eval, preds)
+    rmse = np.sqrt(mse)
+    return mse, rmse
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--min_rating", type=int, default=None)
@@ -176,11 +183,16 @@ if __name__ == "__main__":
         print(f"  Stockfish features: {stockfish_features.shape[1]}")
 
     indices = np.arange(n)
-    train_idx, val_idx = train_test_split(indices, test_size=0.1, random_state=42)
-    X_train, X_val = X[train_idx], X[val_idx]
-    y_train, y_val = y[train_idx], y[val_idx]
+    train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
+    train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=42)
 
-    print(f"\nTraining {args.model_type} with {len(X_train)} train / {len(X_val)} val samples")
+    X_train, X_val, X_test = X[train_idx], X[val_idx], X[test_idx]
+    y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
+
+    print(
+        f"\nTraining {args.model_type} with "
+        f"{len(X_train)} train / {len(X_val)} val / {len(X_test)} test samples"
+    )
 
     model_params = {}
     interrupted = False
@@ -194,6 +206,7 @@ if __name__ == "__main__":
         mlflow.log_param("num_features", X.shape[1])
         mlflow.log_param("num_train", len(X_train))
         mlflow.log_param("num_val", len(X_val))
+        mlflow.log_param("num_test", len(X_test))
 
         try:
             if args.model_type == "xgboost":
@@ -214,23 +227,22 @@ if __name__ == "__main__":
         if args.min_rating is not None or args.max_rating is not None:
             suffix = f"_{args.min_rating or 'min'}to{args.max_rating or 'max'}"
 
-        val_preds = model.predict(X_val)
-        val_mse = mean_squared_error(y_val, val_preds)
-        val_rmse = np.sqrt(val_mse)
-
-        train_preds = model.predict(X_train)
-        train_mse = mean_squared_error(y_train, train_preds)
-        train_rmse = np.sqrt(train_mse)
+        train_mse, train_rmse = evaluate_model(model, X_train, y_train)
+        val_mse, val_rmse = evaluate_model(model, X_val, y_val)
+        test_mse, test_rmse = evaluate_model(model, X_test, y_test)
 
         mlflow.log_metric("train_mse", train_mse)
         mlflow.log_metric("val_mse", val_mse)
+        mlflow.log_metric("test_mse", test_mse)
         mlflow.log_metric("train_rmse", train_rmse)
         mlflow.log_metric("val_rmse", val_rmse)
+        mlflow.log_metric("test_rmse", test_rmse)
 
         status = "interrupted" if interrupted else "complete"
         print(f"\nTraining {status}.")
         print(f"  Train MSE: {train_mse:.2f} (RMSE: {train_rmse:.2f})")
         print(f"  Val   MSE: {val_mse:.2f} (RMSE: {val_rmse:.2f})")
+        print(f"  Test  MSE: {test_mse:.2f} (RMSE: {test_rmse:.2f})")
 
         if args.model_type == "xgboost":
             mlflow.xgboost.log_model(model, f"model{suffix}")
@@ -246,6 +258,8 @@ if __name__ == "__main__":
             'Interrupted': interrupted,
             'Validation_MSE': val_mse,
             'Validation_RMSE': val_rmse,
+            'Test_MSE': test_mse,
+            'Test_RMSE': test_rmse,
             'Train_MSE': train_mse,
             'Train_RMSE': train_rmse,
         }]).to_csv(f"{out_dir}/{args.model_type}_results{suffix}.csv", index=False)
