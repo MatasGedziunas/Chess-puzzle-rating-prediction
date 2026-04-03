@@ -13,17 +13,20 @@ if __name__ == "__main__":
     os.makedirs(out_dir, exist_ok=True)
 
     data_file_name = os.path.splitext(os.path.basename(csv_path))[0]
-    out_path = os.path.join(out_dir, f"{data_file_name}_maia2_probs.npy")
-    ckpt_path = os.path.join(out_dir, f"{data_file_name}_maia2_probs_ckpt.npy")
 
-    if os.path.exists(out_path):
-        print(f"Output already exists at {out_path}, skipping.")
-    else:
-        print(f"Loading {csv_path}")
-        df = pd.read_csv(csv_path)
-        print(f"Loaded {len(df)} rows")
+    print(f"Loading {csv_path}")
+    df = pd.read_csv(csv_path)
+    print(f"Loaded {len(df)} rows")
 
-        probs, policy_indices, top5_probs, top5_indices, elos = compute_maia2_move_probs(df, checkpoint_path=ckpt_path)
+    for model_type in ("rapid", "blitz"):
+        out_path = os.path.join(out_dir, f"{data_file_name}_maia2_{model_type}_probs.npy")
+        ckpt_path = os.path.join(out_dir, f"{data_file_name}_maia2_{model_type}_probs_ckpt.npy")
+
+        if os.path.exists(out_path):
+            print(f"Output already exists at {out_path}, skipping.")
+            continue
+
+        probs, policy_indices, top5_probs, top5_indices, elos = compute_maia2_move_probs(df, checkpoint_path=ckpt_path, model_type=model_type)
         np.save(out_path, probs)
         np.save(out_path.replace("_probs.npy", "_policy_indices.npy"), policy_indices)
         np.save(out_path.replace("_probs.npy", "_top5_probs.npy"), top5_probs)

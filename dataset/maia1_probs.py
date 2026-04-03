@@ -135,10 +135,11 @@ def _derive_flat_features(probs):
     ], axis=1).astype(np.float32)
 
 
-def _load_maia2_model():
+def _load_maia2_model(model_type="rapid"):
     from maia2 import model as maia2_model, utils as maia2_utils
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    m = maia2_model.from_pretrained(type="rapid", device=device)
+    m = maia2_model.from_pretrained(type=model_type, device=device)
+    m = m.to(device)
     m.eval()
     elo_dict = maia2_utils.create_elo_dict()
     all_moves = maia2_utils.get_all_possible_moves()
@@ -149,8 +150,8 @@ def _load_maia2_model():
     return m, device, elo_dict, all_moves_dict, mirror_move, board_to_tensor, map_to_category
 
 
-def compute_maia2_move_probs(df, checkpoint_path=None):
-    m, device, elo_dict, all_moves_dict, mirror_move, board_to_tensor, map_to_category = _load_maia2_model()
+def compute_maia2_move_probs(df, checkpoint_path=None, model_type="rapid"):
+    m, device, elo_dict, all_moves_dict, mirror_move, board_to_tensor, map_to_category = _load_maia2_model(model_type)
 
     n = len(df)
     n_elos = len(MAIA2_ELOS)
@@ -173,11 +174,11 @@ def compute_maia2_move_probs(df, checkpoint_path=None):
         if os.path.exists(top5i_path):
             top5_indices[:len(np.load(top5i_path))] = np.load(top5i_path)
         start_idx = len(saved)
-        print(f"Resuming Maia-2 from row {start_idx}")
+        print(f"Resuming Maia-2 ({model_type}) from row {start_idx}")
 
     elo_indices = [map_to_category(elo, elo_dict) for elo in MAIA2_ELOS]
 
-    for row_idx in tqdm(range(start_idx, n), desc="Maia-2 probs"):
+    for row_idx in tqdm(range(start_idx, n), desc=f"Maia-2 {model_type} probs"):
         row = df.iloc[row_idx]
         board = chess.Board(row['FEN'])
         moves_uci = str(row['Moves']).split()
