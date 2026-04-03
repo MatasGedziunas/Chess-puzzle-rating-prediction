@@ -8,5 +8,6 @@ from .board_features import (
     PIECE_VALUES,
 )
 from .maia2_embeddings import FeatureExtractor, process_puzzle_sequences
+from .maia1_probs import compute_maia1_move_probs, build_maia1_features
 from .stockfish import get_stockfish_features, process_all_puzzles
 from .torch_dataset import ChessPuzzleDataset
