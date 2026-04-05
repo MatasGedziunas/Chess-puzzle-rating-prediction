@@ -4,6 +4,7 @@ import chess
 import numpy as np
 import onnxruntime as ort
 import torch
+from concurrent.futures import ThreadPoolExecutor
 from scipy.special import softmax
 from tqdm import tqdm
 
@@ -13,10 +14,15 @@ MAIA1_ELOS = [1100, 1300, 1500, 1700, 1900]
 MAIA2_ELOS = [1100, 1300, 1500, 1700, 1900]
 MAX_PLAYER_MOVES = 5
 TOP_K = 5
+MAIA1_BATCH_ROWS = 1024
 
 
-def _load_sessions(models_dir):
-    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+def _load_sessions(models_dir, device=None):
+    if device and device.startswith("cuda"):
+        device_id = int(device.split(":")[1]) if ":" in device else 0
+        providers = [('CUDAExecutionProvider', {'device_id': device_id}), 'CPUExecutionProvider']
+    else:
+        providers = ['CPUExecutionProvider']
     sessions = {}
     for elo in MAIA1_ELOS:
         path = os.path.join(models_dir, f"model{elo}.onnx")
@@ -25,8 +31,14 @@ def _load_sessions(models_dir):
     return sessions
 
 
-def compute_maia1_move_probs(df, models_dir="./maia1", checkpoint_path=None):
-    sessions = _load_sessions(models_dir)
+def _run_elo_session(args):
+    session, input_name, batch_planes = args
+    logits = session.run(None, {input_name: batch_planes})[0]
+    return softmax(logits, axis=1)
+
+
+def compute_maia1_move_probs(df, models_dir="./maia1", checkpoint_path=None, device=None):
+    sessions = _load_sessions(models_dir, device=device)
     if not sessions:
         raise FileNotFoundError(f"No Maia-1 ONNX models found in {models_dir}")
 
@@ -55,37 +67,55 @@ def compute_maia1_move_probs(df, models_dir="./maia1", checkpoint_path=None):
         start_idx = len(saved)
         print(f"Resuming Maia-1 from row {start_idx}")
 
-    for row_idx in tqdm(range(start_idx, n), desc="Maia-1 probs"):
-        row = df.iloc[row_idx]
-        board = chess.Board(row['FEN'])
-        moves_uci = str(row['Moves']).split()
-        player_color = not board.turn
+    fens = df['FEN'].tolist()
+    moves_col = df['Moves'].tolist()
 
-        p_count = 0
-        for uci in moves_uci:
-            if p_count >= MAX_PLAYER_MOVES:
-                break
-            if board.turn == player_color:
-                planes = board_to_planes(board)[np.newaxis]
-                policy_idx = uci_to_policy_idx(board, uci)
-                if policy_idx is not None:
-                    policy_indices[row_idx, p_count] = policy_idx
-                    for elo_idx, elo in enumerate(available_elos):
-                        logits = sessions[elo].run(None, {input_name: planes})[0][0]
-                        probs = softmax(logits)
-                        result[row_idx, p_count, elo_idx] = probs[policy_idx]
-                        tk_part = np.argpartition(probs, -TOP_K)[-TOP_K:]
-                        tk_sorted = tk_part[np.argsort(probs[tk_part])[::-1]]
-                        top5_probs[row_idx, p_count, elo_idx] = probs[tk_sorted]
-                        top5_indices[row_idx, p_count, elo_idx] = tk_sorted
-                p_count += 1
-            board.push(chess.Move.from_uci(uci))
+    with ThreadPoolExecutor(max_workers=n_elos) as executor:
+        for chunk_start in tqdm(range(start_idx, n, MAIA1_BATCH_ROWS), desc="Maia-1 probs"):
+            chunk_end = min(chunk_start + MAIA1_BATCH_ROWS, n)
 
-        if checkpoint_path and (row_idx + 1) % 10000 == 0:
-            np.save(checkpoint_path, result[:row_idx + 1])
-            np.save(checkpoint_path.replace(".npy", "_idx.npy"), policy_indices[:row_idx + 1])
-            np.save(checkpoint_path.replace(".npy", "_top5p.npy"), top5_probs[:row_idx + 1])
-            np.save(checkpoint_path.replace(".npy", "_top5i.npy"), top5_indices[:row_idx + 1])
+            entries = []
+            for row_idx in range(chunk_start, chunk_end):
+                board = chess.Board(fens[row_idx])
+                moves_uci = str(moves_col[row_idx]).split()
+                player_color = not board.turn
+                p_count = 0
+                for uci in moves_uci:
+                    if p_count >= MAX_PLAYER_MOVES:
+                        break
+                    if board.turn == player_color:
+                        planes = board_to_planes(board)
+                        policy_idx = uci_to_policy_idx(board, uci)
+                        if policy_idx is not None:
+                            policy_indices[row_idx, p_count] = policy_idx
+                            entries.append((row_idx, p_count, planes, policy_idx))
+                        p_count += 1
+                    board.push(chess.Move.from_uci(uci))
+
+            if not entries:
+                continue
+
+            batch_planes = np.stack([e[2] for e in entries])
+
+            elo_probs_list = list(executor.map(
+                _run_elo_session,
+                [(sessions[elo], input_name, batch_planes) for elo in available_elos]
+            ))
+
+            for elo_idx, probs in enumerate(elo_probs_list):
+                for i, (row_idx, p_count, _, policy_idx) in enumerate(entries):
+                    p = probs[i]
+                    result[row_idx, p_count, elo_idx] = p[policy_idx]
+                    tk_part = np.argpartition(p, -TOP_K)[-TOP_K:]
+                    tk_sorted = tk_part[np.argsort(p[tk_part])[::-1]]
+                    top5_probs[row_idx, p_count, elo_idx] = p[tk_sorted]
+                    top5_indices[row_idx, p_count, elo_idx] = tk_sorted
+
+            if checkpoint_path and chunk_end % 10000 < MAIA1_BATCH_ROWS:
+                np.save(checkpoint_path, result[:chunk_end])
+                np.save(checkpoint_path.replace(".npy", "_idx.npy"), policy_indices[:chunk_end])
+                np.save(checkpoint_path.replace(".npy", "_top5p.npy"), top5_probs[:chunk_end])
+                np.save(checkpoint_path.replace(".npy", "_top5i.npy"), top5_indices[:chunk_end])
 
     return result, policy_indices, top5_probs, top5_indices, available_elos
 
@@ -136,9 +166,10 @@ def _derive_flat_features(probs):
     ], axis=1).astype(np.float32)
 
 
-def _load_maia2_model(model_type="rapid"):
+def _load_maia2_model(model_type="rapid", device=None):
     from maia2 import model as maia2_model, utils as maia2_utils
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     m = maia2_model.from_pretrained(type=model_type, device=device)
     m = m.to(device)
     m.eval()
@@ -152,8 +183,8 @@ def _load_maia2_model(model_type="rapid"):
     return m, device, elo_dict, all_moves_dict, mirror_move, board_to_tensor, map_to_category, get_side_info
 
 
-def compute_maia2_move_probs(df, checkpoint_path=None, model_type="rapid"):
-    m, device, elo_dict, all_moves_dict, mirror_move, board_to_tensor, map_to_category, get_side_info = _load_maia2_model(model_type)
+def compute_maia2_move_probs(df, checkpoint_path=None, model_type="rapid", device=None):
+    m, device, elo_dict, all_moves_dict, mirror_move, board_to_tensor, map_to_category, get_side_info = _load_maia2_model(model_type, device=device)
 
     ce_loss_fn = torch.nn.CrossEntropyLoss(reduction='none')
     bce_loss_fn = torch.nn.BCEWithLogitsLoss(reduction='none')

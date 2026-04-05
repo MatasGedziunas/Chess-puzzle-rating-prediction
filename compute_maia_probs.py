@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse
 import pandas as pd
 import numpy as np
 
@@ -7,10 +8,17 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from dataset.maia1_probs import compute_maia2_move_probs
 
-MODEL_TYPE = "rapid"
 CSV_PATH = "../filtered.csv"
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_type", choices=["rapid", "blitz"], required=True)
+    parser.add_argument("--device", default="cuda:0")
+    args = parser.parse_args()
+
+    MODEL_TYPE = args.model_type
+    DEVICE = args.device
+
     csv_path = os.path.join(os.path.dirname(__file__), CSV_PATH)
     out_dir = "./data"
     os.makedirs(out_dir, exist_ok=True)
@@ -27,7 +35,7 @@ if __name__ == "__main__":
         df = pd.read_csv(csv_path)
         print(f"Loaded {len(df)} rows")
 
-        probs, policy_indices, top5_probs, top5_indices, move_ce, side_info_bce, value_output, elos = compute_maia2_move_probs(df, checkpoint_path=ckpt_path, model_type=MODEL_TYPE)
+        probs, policy_indices, top5_probs, top5_indices, move_ce, side_info_bce, value_output, elos = compute_maia2_move_probs(df, checkpoint_path=ckpt_path, model_type=MODEL_TYPE, device=DEVICE)
         np.save(out_path, probs)
         np.save(out_path.replace("_probs.npy", "_policy_indices.npy"), policy_indices)
         np.save(out_path.replace("_probs.npy", "_top5_probs.npy"), top5_probs)
