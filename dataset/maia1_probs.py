@@ -74,9 +74,10 @@ def compute_maia1_move_probs(df, models_dir="./maia1", checkpoint_path=None):
                         logits = sessions[elo].run(None, {input_name: planes})[0][0]
                         probs = softmax(logits)
                         result[row_idx, p_count, elo_idx] = probs[policy_idx]
-                        tk_idx = np.argsort(probs)[-TOP_K:][::-1]
-                        top5_probs[row_idx, p_count, elo_idx] = probs[tk_idx]
-                        top5_indices[row_idx, p_count, elo_idx] = tk_idx
+                        tk_part = np.argpartition(probs, -TOP_K)[-TOP_K:]
+                        tk_sorted = tk_part[np.argsort(probs[tk_part])[::-1]]
+                        top5_probs[row_idx, p_count, elo_idx] = probs[tk_sorted]
+                        top5_indices[row_idx, p_count, elo_idx] = tk_sorted
                 p_count += 1
             board.push(chess.Move.from_uci(uci))
 
@@ -147,11 +148,15 @@ def _load_maia2_model(model_type="rapid"):
     mirror_move = maia2_utils.mirror_move
     board_to_tensor = __import__("maia2.inference", fromlist=["board_to_tensor"]).board_to_tensor
     map_to_category = maia2_utils.map_to_category
-    return m, device, elo_dict, all_moves_dict, mirror_move, board_to_tensor, map_to_category
+    get_side_info = maia2_utils.get_side_info
+    return m, device, elo_dict, all_moves_dict, mirror_move, board_to_tensor, map_to_category, get_side_info
 
 
 def compute_maia2_move_probs(df, checkpoint_path=None, model_type="rapid"):
-    m, device, elo_dict, all_moves_dict, mirror_move, board_to_tensor, map_to_category = _load_maia2_model(model_type)
+    m, device, elo_dict, all_moves_dict, mirror_move, board_to_tensor, map_to_category, get_side_info = _load_maia2_model(model_type)
+
+    ce_loss_fn = torch.nn.CrossEntropyLoss(reduction='none')
+    bce_loss_fn = torch.nn.BCEWithLogitsLoss(reduction='none')
 
     n = len(df)
     n_elos = len(MAIA2_ELOS)
@@ -159,6 +164,9 @@ def compute_maia2_move_probs(df, checkpoint_path=None, model_type="rapid"):
     policy_indices = np.full((n, MAX_PLAYER_MOVES), -1, dtype=np.int32)
     top5_probs = np.zeros((n, MAX_PLAYER_MOVES, n_elos, TOP_K), dtype=np.float32)
     top5_indices = np.full((n, MAX_PLAYER_MOVES, n_elos, TOP_K), -1, dtype=np.int32)
+    move_ce = np.zeros((n, MAX_PLAYER_MOVES, n_elos), dtype=np.float32)
+    side_info_bce = np.zeros((n, MAX_PLAYER_MOVES, n_elos), dtype=np.float32)
+    value_output = np.zeros((n, MAX_PLAYER_MOVES, n_elos), dtype=np.float32)
 
     start_idx = 0
     if checkpoint_path and os.path.exists(checkpoint_path):
@@ -173,10 +181,21 @@ def compute_maia2_move_probs(df, checkpoint_path=None, model_type="rapid"):
         top5i_path = checkpoint_path.replace(".npy", "_top5i.npy")
         if os.path.exists(top5i_path):
             top5_indices[:len(np.load(top5i_path))] = np.load(top5i_path)
+        ce_path = checkpoint_path.replace(".npy", "_ce.npy")
+        if os.path.exists(ce_path):
+            move_ce[:len(np.load(ce_path))] = np.load(ce_path)
+        bce_path = checkpoint_path.replace(".npy", "_bce.npy")
+        if os.path.exists(bce_path):
+            side_info_bce[:len(np.load(bce_path))] = np.load(bce_path)
+        val_path = checkpoint_path.replace(".npy", "_val.npy")
+        if os.path.exists(val_path):
+            value_output[:len(np.load(val_path))] = np.load(val_path)
         start_idx = len(saved)
         print(f"Resuming Maia-2 ({model_type}) from row {start_idx}")
 
     elo_indices = [map_to_category(elo, elo_dict) for elo in MAIA2_ELOS]
+
+    elo_t_batch = torch.tensor(elo_indices, dtype=torch.long).to(device)
 
     for row_idx in tqdm(range(start_idx, n), desc=f"Maia-2 {model_type} probs"):
         row = df.iloc[row_idx]
@@ -192,20 +211,28 @@ def compute_maia2_move_probs(df, checkpoint_path=None, model_type="rapid"):
                 is_black = not board.turn
                 b = board.mirror() if is_black else board
                 board_input = board_to_tensor(b).unsqueeze(0).to(device)
+                board_batch = board_input.expand(n_elos, -1, -1, -1)
                 move_key = mirror_move(uci) if is_black else uci
                 move_key = move_key.rstrip("n")
                 policy_idx = all_moves_dict.get(move_key)
                 if policy_idx is not None:
                     policy_indices[row_idx, p_count] = policy_idx
-                    for elo_idx, elo_cat in enumerate(elo_indices):
-                        elo_t = torch.tensor([elo_cat]).to(device)
-                        with torch.no_grad():
-                            logits_policy, _, _ = m(board_input, elos_self=elo_t, elos_oppo=elo_t)
-                        probs = torch.softmax(logits_policy[0], dim=0).cpu().numpy()
-                        result[row_idx, p_count, elo_idx] = probs[policy_idx]
-                        tk_idx = np.argsort(probs)[-TOP_K:][::-1]
-                        top5_probs[row_idx, p_count, elo_idx] = probs[tk_idx]
-                        top5_indices[row_idx, p_count, elo_idx] = tk_idx
+                    _, gt_side_info = get_side_info(b, move_key, all_moves_dict)
+                    gt_side_info_batch = gt_side_info.unsqueeze(0).expand(n_elos, -1).to(device)
+                    target_batch = torch.full((n_elos,), policy_idx, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        logits_policy, logits_si, logits_val = m(board_batch, elos_self=elo_t_batch, elos_oppo=elo_t_batch)
+                    all_probs = torch.softmax(logits_policy, dim=1).cpu().numpy()
+                    result[row_idx, p_count] = all_probs[:, policy_idx]
+                    move_ce[row_idx, p_count] = ce_loss_fn(logits_policy, target_batch).cpu().numpy()
+                    side_info_bce[row_idx, p_count] = bce_loss_fn(logits_si, gt_side_info_batch).mean(dim=1).cpu().numpy()
+                    value_output[row_idx, p_count] = logits_val.cpu().numpy().flatten()
+                    for elo_idx in range(n_elos):
+                        p = all_probs[elo_idx]
+                        tk_part = np.argpartition(p, -TOP_K)[-TOP_K:]
+                        tk_sorted = tk_part[np.argsort(p[tk_part])[::-1]]
+                        top5_probs[row_idx, p_count, elo_idx] = p[tk_sorted]
+                        top5_indices[row_idx, p_count, elo_idx] = tk_sorted
                 p_count += 1
             board.push(chess.Move.from_uci(uci))
 
@@ -214,14 +241,20 @@ def compute_maia2_move_probs(df, checkpoint_path=None, model_type="rapid"):
             np.save(checkpoint_path.replace(".npy", "_idx.npy"), policy_indices)
             np.save(checkpoint_path.replace(".npy", "_top5p.npy"), top5_probs)
             np.save(checkpoint_path.replace(".npy", "_top5i.npy"), top5_indices)
+            np.save(checkpoint_path.replace(".npy", "_ce.npy"), move_ce)
+            np.save(checkpoint_path.replace(".npy", "_bce.npy"), side_info_bce)
+            np.save(checkpoint_path.replace(".npy", "_val.npy"), value_output)
 
     if checkpoint_path:
         np.save(checkpoint_path, result)
         np.save(checkpoint_path.replace(".npy", "_idx.npy"), policy_indices)
         np.save(checkpoint_path.replace(".npy", "_top5p.npy"), top5_probs)
         np.save(checkpoint_path.replace(".npy", "_top5i.npy"), top5_indices)
+        np.save(checkpoint_path.replace(".npy", "_ce.npy"), move_ce)
+        np.save(checkpoint_path.replace(".npy", "_bce.npy"), side_info_bce)
+        np.save(checkpoint_path.replace(".npy", "_val.npy"), value_output)
 
-    return result, policy_indices, top5_probs, top5_indices, MAIA2_ELOS
+    return result, policy_indices, top5_probs, top5_indices, move_ce, side_info_bce, value_output, MAIA2_ELOS
 
 
 def build_maia2_features(df, data_file_name=None, cache_dir="./data"):
@@ -231,15 +264,18 @@ def build_maia2_features(df, data_file_name=None, cache_dir="./data"):
             return _derive_flat_features(np.load(cache_path))
 
     checkpoint_path = os.path.join(cache_dir, f"{data_file_name}_maia2_probs_ckpt.npy") if data_file_name else None
-    probs, policy_indices, top5_probs, top5_indices, _ = compute_maia2_move_probs(df, checkpoint_path=checkpoint_path)
+    probs, policy_indices, top5_probs, top5_indices, move_ce, side_info_bce, value_output, _ = compute_maia2_move_probs(df, checkpoint_path=checkpoint_path)
 
     if data_file_name is not None:
         np.save(cache_path, probs)
         np.save(os.path.join(cache_dir, f"{data_file_name}_maia2_policy_indices.npy"), policy_indices)
         np.save(os.path.join(cache_dir, f"{data_file_name}_maia2_top5_probs.npy"), top5_probs)
         np.save(os.path.join(cache_dir, f"{data_file_name}_maia2_top5_indices.npy"), top5_indices)
+        np.save(os.path.join(cache_dir, f"{data_file_name}_maia2_move_ce.npy"), move_ce)
+        np.save(os.path.join(cache_dir, f"{data_file_name}_maia2_side_info_bce.npy"), side_info_bce)
+        np.save(os.path.join(cache_dir, f"{data_file_name}_maia2_value.npy"), value_output)
         if checkpoint_path and os.path.exists(checkpoint_path):
-            for suffix in [".npy", "_idx.npy", "_top5p.npy", "_top5i.npy"]:
+            for suffix in [".npy", "_idx.npy", "_top5p.npy", "_top5i.npy", "_ce.npy", "_bce.npy", "_val.npy"]:
                 p = checkpoint_path.replace(".npy", suffix) if suffix != ".npy" else checkpoint_path
                 if os.path.exists(p):
                     os.remove(p)
