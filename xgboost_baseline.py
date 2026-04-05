@@ -108,7 +108,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_sample_weights", action="store_true", default=False)
     args = parser.parse_args()
 
-    csv_path = "../filtered.csv"
+    # csv_path = "../filtered.csv"
+    csv_path = "./data/p200k.csv"
     stockfish_path = "../filtered_sf_evals.csv"
     data_file_name = os.path.splitext(os.path.basename(csv_path))[0]
 
@@ -126,8 +127,10 @@ if __name__ == "__main__":
     if args.use_maia2_probs:
         maia2_features = load_maia2_features(data_file_name, data_dir="./data")
 
-    X_struct = build_features(df, "../filtered_struct_features.csv")
+    # X_struct = build_features(df, "../filtered_struct_features.csv")
+    X_struct = build_features(df)
     X_themes = encode_themes(df, themes_csv_path="../filtered_themes_only.csv")
+
     y = df['Rating'].values
 
     mask = np.ones(len(y), dtype=bool)
@@ -242,9 +245,9 @@ if __name__ == "__main__":
         if args.model_type == "xgboost":
             mlflow.xgboost.log_model(model, f"model{suffix}")
         else:
-            mlflow.lightgbm.log_model(model, f"model{suffix}Filtered")
+            mlflow.lightgbm.log_model(model, f"model{suffix}p200kMaia2")
 
-        out_dir = "./results/filtered"
+        out_dir = "./results/p200k"
         os.makedirs(out_dir, exist_ok=True)
         pd.DataFrame([{
             'Model': args.model_type,
@@ -257,4 +260,4 @@ if __name__ == "__main__":
             'Test_RMSE': test_rmse,
             'Train_MSE': train_mse,
             'Train_RMSE': train_rmse,
-        }]).to_csv(f"{out_dir}/{args.model_type}_results{suffix}.csv", index=False)
+        }]).to_csv(f"{out_dir}/{args.model_type}_results{suffix}p200kMaia2.csv", index=False)
