@@ -10,37 +10,34 @@ import mlflow
 
 from dataset.loaders import load_data
 from dataset.board_features import build_features, encode_themes, build_advanced_features, build_success_prob_features
+from dataset.maia1_probs import _derive_flat_features
 
 
-def flatten_maia_embeddings(maia_seq):
-    return maia_seq.mean(axis=1)
-
-
-def prepare_features(X_struct, X_themes, maia_seq_flat, advanced_features, success_prob_features, stockfish_features=None, save_path=None):
+def prepare_features(X_struct, X_themes, advanced_features, success_prob_features, stockfish_features=None, maia2_features=None, save_path=None):
     if save_path is not None and os.path.exists(save_path):
         return np.load(save_path)
 
     parts = [X_struct, X_themes, advanced_features, success_prob_features]
-    if maia_seq_flat is not None:
-        parts.append(maia_seq_flat)
     if stockfish_features is not None:
         parts.append(stockfish_features)
+    if maia2_features is not None:
+        parts.append(maia2_features)
     X = np.concatenate(parts, axis=1)
     if save_path is not None:
         np.save(save_path, X)
     return X
 
 
-def apply_rating_mask(mask, X_struct, X_themes, maia_seq_flat, stockfish_features, y, df):
+def apply_rating_mask(mask, X_struct, X_themes, stockfish_features, y, df, maia2_features=None):
     X_struct = X_struct[mask]
     X_themes = X_themes[mask]
-    if maia_seq_flat is not None:
-        maia_seq_flat = maia_seq_flat[mask]
     if stockfish_features is not None:
         stockfish_features = stockfish_features[mask]
+    if maia2_features is not None:
+        maia2_features = maia2_features[mask]
     y = y[mask]
     df = df[mask].reset_index(drop=True)
-    return X_struct, X_themes, maia_seq_flat, stockfish_features, y, df
+    return X_struct, X_themes, stockfish_features, y, df, maia2_features
 
 
 def train_xgboost(X_train, y_train, X_val, y_val, sample_weights=None):
@@ -106,30 +103,40 @@ if __name__ == "__main__":
     parser.add_argument("--max_rating", type=int, default=None)
     parser.add_argument("--model_type", choices=["xgboost", "lightgbm"], default="lightgbm")
     parser.add_argument("--max_rows", type=int, default=200000)
-    parser.add_argument("--use_maia_embeddings", action="store_true", default=False)
+
+    parser.add_argument("--use_maia2_probs", action="store_true", default=True)
     parser.add_argument("--filter_rating_deviation", action="store_true", default=True)
     parser.add_argument("--use_sample_weights", action="store_true", default=False)
     args = parser.parse_args()
 
     csv_path = "../filtered.csv"
-    embeddings_path = "./data/p200k/maia2.npy" if args.use_maia_embeddings else None
     stockfish_path = "../filtered_sf_evals.csv"
+    data_file_name = os.path.splitext(os.path.basename(csv_path))[0]
 
     mlflow.set_experiment("Chess_Puzzle_Rating_Prediction")
 
-    df, maia_seq, stockfish_features = load_data(
+    df, stockfish_features = load_data(
         csv_path,
-        embeddings_path,
         stockfish_path,
-        load_maia_embeddings=args.use_maia_embeddings,
     )
 
     if args.filter_rating_deviation and 'RatingDeviation' in df.columns:
         df = df[df['RatingDeviation'] <= 90].reset_index(drop=True)
 
+    maia2_features = None
+    if args.use_maia2_probs:
+        maia2_parts = []
+        for model_type in ("rapid", "blitz"):
+            probs_path = os.path.join("./data", f"{data_file_name}_maia2_{model_type}_probs.npy")
+            if os.path.exists(probs_path):
+                maia2_parts.append(_derive_flat_features(np.load(probs_path)))
+            else:
+                print(f"Warning: {probs_path} not found, skipping {model_type} maia2 features")
+        if maia2_parts:
+            maia2_features = np.concatenate(maia2_parts, axis=1)
+
     X_struct = build_features(df, "../filtered_struct_features.csv")
     X_themes = encode_themes(df, themes_csv_path="../filtered_themes_only.csv")
-    maia_seq_flat = flatten_maia_embeddings(maia_seq) if args.use_maia_embeddings else None
     y = df['Rating'].values
 
     mask = np.ones(len(y), dtype=bool)
@@ -138,17 +145,17 @@ if __name__ == "__main__":
     if args.max_rating is not None:
         mask &= (y < args.max_rating)
 
-    X_struct, X_themes, maia_seq_flat, stockfish_features, y, df = apply_rating_mask(
-        mask, X_struct, X_themes, maia_seq_flat, stockfish_features, y, df
+    X_struct, X_themes, stockfish_features, y, df, maia2_features = apply_rating_mask(
+        mask, X_struct, X_themes, stockfish_features, y, df, maia2_features
     )
 
     n = len(df)
     X_struct = X_struct[:n]
     X_themes = X_themes[:n]
-    if maia_seq_flat is not None:
-        maia_seq_flat = maia_seq_flat[:n]
     if stockfish_features is not None:
         stockfish_features = stockfish_features[:n]
+    if maia2_features is not None:
+        maia2_features = maia2_features[:n]
     y = y[:n]
 
     rating_deviation = df['RatingDeviation'].values[:n].astype(np.float32) if 'RatingDeviation' in df.columns else None
@@ -156,31 +163,28 @@ if __name__ == "__main__":
     if args.use_sample_weights and rating_deviation is not None:
         sample_weights = (1.0 / np.maximum(rating_deviation, 1.0)).astype(np.float32) 
 
-    data_file_name = os.path.splitext(os.path.basename(csv_path))[0]
     advanced_features = build_advanced_features(df, data_file_name)
     success_prob_features = build_success_prob_features(df)
 
     X = prepare_features(
         X_struct,
         X_themes,
-        maia_seq_flat,
         advanced_features,
         success_prob_features,
         stockfish_features,
-        save_path="../filtered_combined_features.npy",
+        maia2_features,
+        save_path=None,
     )
     print(f"Total feature dimension: {X.shape[1]}")
     print(f"  Struct features:    {X_struct.shape[1]}")
     print(f"  Theme features:     {X_themes.shape[1]}")
-    if maia_seq_flat is not None:
-        print(f"  Maia embeddings:    {maia_seq_flat.shape[1]}")
-    else:
-        print(f"  Maia embeddings:    disabled")
     print(f"  Advanced features:  {advanced_features.shape[1]}")
     print(f"  Success prob stats: {success_prob_features.shape[1]}")
     print(f"  Length feature:     included in struct")
     if stockfish_features is not None:
         print(f"  Stockfish features: {stockfish_features.shape[1]}")
+    if maia2_features is not None:
+        print(f"  Maia2 prob features:{maia2_features.shape[1]}")
 
     indices = np.arange(n)
     train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
