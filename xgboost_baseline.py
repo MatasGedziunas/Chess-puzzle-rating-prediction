@@ -10,9 +10,10 @@ import mlflow
 
 from dataset.loaders import load_data, load_maia2_features
 from dataset.board_features import build_features, encode_themes, build_advanced_features, build_success_prob_features
+from embedding.maia2_mlp import load_or_train_mlp_embedder
 
 
-def prepare_features(X_struct, X_themes, advanced_features, success_prob_features, stockfish_features=None, maia2_features=None, save_path=None):
+def prepare_features(X_struct, X_themes, advanced_features, success_prob_features, stockfish_features=None, maia2_features=None, maia2_embeddings=None, save_path=None):
     if save_path is not None and os.path.exists(save_path):
         return np.load(save_path)
 
@@ -21,22 +22,26 @@ def prepare_features(X_struct, X_themes, advanced_features, success_prob_feature
         parts.append(stockfish_features)
     if maia2_features is not None:
         parts.append(maia2_features)
+    if maia2_embeddings is not None:
+        parts.append(maia2_embeddings)
     X = np.concatenate(parts, axis=1)
     if save_path is not None:
         np.save(save_path, X)
     return X
 
 
-def apply_rating_mask(mask, X_struct, X_themes, stockfish_features, y, df, maia2_features=None):
+def apply_rating_mask(mask, X_struct, X_themes, stockfish_features, y, df, maia2_features=None, maia2_embeddings=None):
     X_struct = X_struct[mask]
     X_themes = X_themes[mask]
     if stockfish_features is not None:
         stockfish_features = stockfish_features[mask]
     if maia2_features is not None:
         maia2_features = maia2_features[mask]
+    if maia2_embeddings is not None:
+        maia2_embeddings = maia2_embeddings[mask]
     y = y[mask]
     df = df[mask].reset_index(drop=True)
-    return X_struct, X_themes, stockfish_features, y, df, maia2_features
+    return X_struct, X_themes, stockfish_features, y, df, maia2_features, maia2_embeddings
 
 
 def train_xgboost(X_train, y_train, X_val, y_val, sample_weights=None):
@@ -104,6 +109,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_rows", type=int, default=200000)
 
     parser.add_argument("--use_maia2_probs", action="store_true", default=True)
+    parser.add_argument("--use_maia2_mlp", action="store_true", default=False)
     parser.add_argument("--filter_rating_deviation", action="store_true", default=True)
     parser.add_argument("--use_sample_weights", action="store_true", default=False)
     args = parser.parse_args()
@@ -139,7 +145,7 @@ if __name__ == "__main__":
     if args.max_rating is not None:
         mask &= (y < args.max_rating)
 
-    X_struct, X_themes, stockfish_features, y, df, maia2_features = apply_rating_mask(
+    X_struct, X_themes, stockfish_features, y, df, maia2_features, maia2_embeddings = apply_rating_mask(
         mask, X_struct, X_themes, stockfish_features, y, df, maia2_features
     )
 
@@ -155,10 +161,25 @@ if __name__ == "__main__":
     rating_deviation = df['RatingDeviation'].values[:n].astype(np.float32) if 'RatingDeviation' in df.columns else None
     sample_weights = None
     if args.use_sample_weights and rating_deviation is not None:
-        sample_weights = (1.0 / np.maximum(rating_deviation, 1.0)).astype(np.float32) 
+        sample_weights = (1.0 / np.maximum(rating_deviation, 1.0)).astype(np.float32)
 
     advanced_features = build_advanced_features(df, data_file_name)
     success_prob_features = build_success_prob_features(df)
+
+    indices = np.arange(n)
+    train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
+    train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=42)
+
+    maia2_embeddings = None
+    if args.use_maia2_mlp and maia2_features is not None:
+        maia2_embeddings = load_or_train_mlp_embedder(
+            maia2_features[train_idx], y[train_idx],
+            maia2_features[val_idx], y[val_idx],
+            maia2_features,
+            input_dim=maia2_features.shape[1],
+            cache_dir="./data",
+            data_file_name=data_file_name,
+        )
 
     X = prepare_features(
         X_struct,
@@ -167,6 +188,7 @@ if __name__ == "__main__":
         success_prob_features,
         stockfish_features,
         maia2_features,
+        maia2_embeddings,
         save_path=None,
     )
     print(f"Total feature dimension: {X.shape[1]}")
@@ -179,6 +201,8 @@ if __name__ == "__main__":
         print(f"  Stockfish features: {stockfish_features.shape[1]}")
     if maia2_features is not None:
         print(f"  Maia2 prob features:{maia2_features.shape[1]}")
+    if maia2_embeddings is not None:
+        print(f"  Maia2 MLP embeddings:{maia2_embeddings.shape[1]}")
 
     indices = np.arange(n)
     train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
