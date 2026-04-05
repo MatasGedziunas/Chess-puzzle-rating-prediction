@@ -8,9 +8,8 @@ from sklearn.metrics import mean_squared_error
 import pandas as pd
 import mlflow
 
-from dataset.loaders import load_data
+from dataset.loaders import load_data, load_maia2_features
 from dataset.board_features import build_features, encode_themes, build_advanced_features, build_success_prob_features
-from dataset.maia1_probs import _derive_flat_features
 
 
 def prepare_features(X_struct, X_themes, advanced_features, success_prob_features, stockfish_features=None, maia2_features=None, save_path=None):
@@ -125,15 +124,7 @@ if __name__ == "__main__":
 
     maia2_features = None
     if args.use_maia2_probs:
-        maia2_parts = []
-        for model_type in ("rapid", "blitz"):
-            probs_path = os.path.join("./data", f"{data_file_name}_maia2_{model_type}_probs.npy")
-            if os.path.exists(probs_path):
-                maia2_parts.append(_derive_flat_features(np.load(probs_path)))
-            else:
-                print(f"Warning: {probs_path} not found, skipping {model_type} maia2 features")
-        if maia2_parts:
-            maia2_features = np.concatenate(maia2_parts, axis=1)
+        maia2_features = load_maia2_features(data_file_name, data_dir="./data")
 
     X_struct = build_features(df, "../filtered_struct_features.csv")
     X_themes = encode_themes(df, themes_csv_path="../filtered_themes_only.csv")
