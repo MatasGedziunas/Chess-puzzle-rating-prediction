@@ -42,7 +42,7 @@ def train_lightgbm(X_train, y_train, X_val, y_val, sample_weights=None):
         "num_leaves": 63,
         "min_child_samples": 20,
         "objective": "regression",
-        "metric": "rmse",
+        "metric": "mse",
         "random_state": 42,
         "verbosity": -1,
         "device": "cuda",
@@ -75,14 +75,15 @@ if __name__ == "__main__":
     parser.add_argument("--model_type", choices=["xgboost", "lightgbm"], default="lightgbm")
     parser.add_argument("--max_rows", type=int, default=200000)
 
+    parser.add_argument("--use_maia1_probs", action="store_true", default=True)
     parser.add_argument("--use_maia2_probs", action="store_true", default=True)
     parser.add_argument("--use_maia2_mlp", action="store_true", default=False)
     parser.add_argument("--filter_rating_deviation", action="store_true", default=True)
     parser.add_argument("--use_sample_weights", action="store_true", default=False)
     args = parser.parse_args()
 
-    # csv_path = "../filtered.csv"
-    csv_path = "./data/p200k.csv"
+    csv_path = "../filtered.csv"
+    # csv_path = "./data/p200k.csv"
     stockfish_path = "../filtered_sf_evals.csv"
     data_file_name = os.path.splitext(os.path.basename(csv_path))[0]
 
@@ -93,6 +94,7 @@ if __name__ == "__main__":
         data_dir="./data",
         stockfish_path=stockfish_path,
         themes_csv_path="../filtered_themes_only.csv",
+        use_maia1=args.use_maia1_probs,
         use_maia2=args.use_maia2_probs,
         use_maia2_mlp=args.use_maia2_mlp,
         filter_rating_deviation=args.filter_rating_deviation,
@@ -174,9 +176,9 @@ if __name__ == "__main__":
         if args.model_type == "xgboost":
             mlflow.xgboost.log_model(model, f"model{suffix}")
         else:
-            mlflow.lightgbm.log_model(model, f"model{suffix}p200kMaia2")
+            mlflow.lightgbm.log_model(model, f"model{suffix}{data_file_name}Maia1")
 
-        out_dir = "./results/p200k"
+        out_dir = f"./results/{data_file_name}"
         os.makedirs(out_dir, exist_ok=True)
         pd.DataFrame([{
             'Model': args.model_type,
@@ -189,4 +191,4 @@ if __name__ == "__main__":
             'Test_RMSE': test_rmse,
             'Train_MSE': train_mse,
             'Train_RMSE': train_rmse,
-        }]).to_csv(f"{out_dir}/{args.model_type}_results{suffix}p200kMaia2.csv", index=False)
+        }]).to_csv(f"{out_dir}/{args.model_type}_results{suffix}Maia1.csv", index=False)

@@ -4,7 +4,7 @@ import pandas as pd
 
 from sklearn.model_selection import train_test_split
 
-from .loaders import load_data, load_maia2_features
+from .loaders import load_data, load_maia1_features, load_maia2_features
 from .board_features import build_features, encode_themes, build_advanced_features, build_success_prob_features
 
 
@@ -15,6 +15,7 @@ class ChessPuzzleDataset:
         data_dir="./data",
         stockfish_path=None,
         themes_csv_path=None,
+        use_maia1=True,
         use_maia2=True,
         use_maia2_mlp=False,
         filter_rating_deviation=True,
@@ -24,6 +25,7 @@ class ChessPuzzleDataset:
         self.data_dir = data_dir
         self.stockfish_path = stockfish_path
         self.themes_csv_path = themes_csv_path
+        self.use_maia1 = use_maia1
         self.use_maia2 = use_maia2
         self.use_maia2_mlp = use_maia2_mlp
         self.filter_rating_deviation = filter_rating_deviation
@@ -32,6 +34,8 @@ class ChessPuzzleDataset:
 
     def _cache_path(self):
         suffix = ""
+        if not self.use_maia1:
+            suffix += "_nomaia1"
         if not self.use_maia2:
             suffix += "_nomaia2"
         if self.use_maia2_mlp:
@@ -79,6 +83,12 @@ class ChessPuzzleDataset:
             if maia2_features is not None:
                 parts.append(maia2_features[:len(df)])
                 feature_log["maia2"] = maia2_features.shape[1]
+
+        if self.use_maia1:
+            maia1_features = load_maia1_features(self.data_file_name, self.data_dir)
+            if maia1_features is not None:
+                parts.append(maia1_features[:len(df)])
+                feature_log["maia1"] = maia1_features.shape[1]
 
         X = np.concatenate(parts, axis=1).astype(np.float32)
 
@@ -135,5 +145,3 @@ class ChessPuzzleDataset:
         )
         print(f"Saved to {cache_path}")
         return X, y, df
-
-    def _build_features(self):

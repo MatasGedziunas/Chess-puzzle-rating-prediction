@@ -99,3 +99,33 @@ def load_maia2_features(data_file_name, data_dir="./data"):
         parts.append(_derive_maia2_extended_features(probs, top5_probs, top5_indices, policy_indices, move_ce, side_info_bce, value_output))
 
     return np.concatenate(parts, axis=1) if parts else None
+
+
+def load_maia1_features(data_file_name, data_dir="./data"):
+    from .maia1_probs import _derive_flat_features
+    probs_path = os.path.join(data_dir, f"{data_file_name}_maia1_probs.npy")
+    top5p_path = os.path.join(data_dir, f"{data_file_name}_maia1_top5_probs.npy")
+    top5i_path = os.path.join(data_dir, f"{data_file_name}_maia1_top5_indices.npy")
+    pidx_path = os.path.join(data_dir, f"{data_file_name}_maia1_policy_indices.npy")
+
+    if not os.path.exists(probs_path):
+        print(f"Warning: {probs_path} not found, skipping maia1 features")
+        return None
+
+    probs = np.load(probs_path)
+    feature_parts = [_derive_flat_features(probs)]
+
+    if os.path.exists(top5p_path) and os.path.exists(top5i_path) and os.path.exists(pidx_path):
+        top5_probs = np.load(top5p_path)
+        top5_indices = np.load(top5i_path)
+        policy_indices = np.load(pidx_path)
+        rank = _compute_correct_move_rank(probs, top5_indices, policy_indices)
+        gap_to_top1 = top5_probs[:, :, :, 0] - probs
+        prob_ratio = probs / (top5_probs[:, :, :, 0] + 1e-7)
+        feature_parts += [
+            _reduce_move_elo(rank),
+            _reduce_move_elo(gap_to_top1),
+            _reduce_move_elo(prob_ratio),
+        ]
+
+    return np.concatenate(feature_parts, axis=1).astype(np.float32)
