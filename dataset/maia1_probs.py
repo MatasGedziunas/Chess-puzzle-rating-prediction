@@ -268,13 +268,13 @@ def compute_maia2_move_probs(df, checkpoint_path=None, model_type="rapid", devic
             board.push(chess.Move.from_uci(uci))
 
         if checkpoint_path and (row_idx + 1) % 10000 == 0:
-            np.save(checkpoint_path, result)
-            np.save(checkpoint_path.replace(".npy", "_idx.npy"), policy_indices)
-            np.save(checkpoint_path.replace(".npy", "_top5p.npy"), top5_probs)
-            np.save(checkpoint_path.replace(".npy", "_top5i.npy"), top5_indices)
-            np.save(checkpoint_path.replace(".npy", "_ce.npy"), move_ce)
-            np.save(checkpoint_path.replace(".npy", "_bce.npy"), side_info_bce)
-            np.save(checkpoint_path.replace(".npy", "_val.npy"), value_output)
+            np.save(checkpoint_path, result[:row_idx + 1])
+            np.save(checkpoint_path.replace(".npy", "_idx.npy"), policy_indices[:row_idx + 1])
+            np.save(checkpoint_path.replace(".npy", "_top5p.npy"), top5_probs[:row_idx + 1])
+            np.save(checkpoint_path.replace(".npy", "_top5i.npy"), top5_indices[:row_idx + 1])
+            np.save(checkpoint_path.replace(".npy", "_ce.npy"), move_ce[:row_idx + 1])
+            np.save(checkpoint_path.replace(".npy", "_bce.npy"), side_info_bce[:row_idx + 1])
+            np.save(checkpoint_path.replace(".npy", "_val.npy"), value_output[:row_idx + 1])
 
     if checkpoint_path:
         np.save(checkpoint_path, result)

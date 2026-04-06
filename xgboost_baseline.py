@@ -8,40 +8,7 @@ from sklearn.metrics import mean_squared_error
 import pandas as pd
 import mlflow
 
-from dataset.loaders import load_data, load_maia2_features
-from dataset.board_features import build_features, encode_themes, build_advanced_features, build_success_prob_features
-from embedding.maia2_mlp import load_or_train_mlp_embedder
-
-
-def prepare_features(X_struct, X_themes, advanced_features, success_prob_features, stockfish_features=None, maia2_features=None, maia2_embeddings=None, save_path=None):
-    if save_path is not None and os.path.exists(save_path):
-        return np.load(save_path)
-
-    parts = [X_struct, X_themes, advanced_features, success_prob_features]
-    if stockfish_features is not None:
-        parts.append(stockfish_features)
-    if maia2_features is not None:
-        parts.append(maia2_features)
-    if maia2_embeddings is not None:
-        parts.append(maia2_embeddings)
-    X = np.concatenate(parts, axis=1)
-    if save_path is not None:
-        np.save(save_path, X)
-    return X
-
-
-def apply_rating_mask(mask, X_struct, X_themes, stockfish_features, y, df, maia2_features=None, maia2_embeddings=None):
-    X_struct = X_struct[mask]
-    X_themes = X_themes[mask]
-    if stockfish_features is not None:
-        stockfish_features = stockfish_features[mask]
-    if maia2_features is not None:
-        maia2_features = maia2_features[mask]
-    if maia2_embeddings is not None:
-        maia2_embeddings = maia2_embeddings[mask]
-    y = y[mask]
-    df = df[mask].reset_index(drop=True)
-    return X_struct, X_themes, stockfish_features, y, df, maia2_features, maia2_embeddings
+from dataset.chess_puzzle_dataset import ChessPuzzleDataset
 
 
 def train_xgboost(X_train, y_train, X_val, y_val, sample_weights=None):
@@ -87,7 +54,7 @@ def train_lightgbm(X_train, y_train, X_val, y_val, sample_weights=None):
         sample_weight=sample_weights,
         eval_set=[(X_train, y_train), (X_val, y_val)],
         callbacks=[
-            lgb.early_stopping(stopping_rounds=50, verbose=True),
+            lgb.early_stopping(stopping_rounds=100, verbose=True),
             lgb.log_evaluation(period=100),
         ],
     )
@@ -121,92 +88,30 @@ if __name__ == "__main__":
 
     mlflow.set_experiment("Chess_Puzzle_Rating_Prediction")
 
-    df, stockfish_features = load_data(
-        csv_path,
-        stockfish_path,
+    dataset = ChessPuzzleDataset(
+        csv_path=csv_path,
+        data_dir="./data",
+        stockfish_path=stockfish_path,
+        themes_csv_path="../filtered_themes_only.csv",
+        use_maia2=args.use_maia2_probs,
+        use_maia2_mlp=args.use_maia2_mlp,
+        filter_rating_deviation=args.filter_rating_deviation,
+        max_rows=args.max_rows,
     )
-
-    if args.filter_rating_deviation and 'RatingDeviation' in df.columns:
-        df = df[df['RatingDeviation'] <= 90].reset_index(drop=True)
-
-    maia2_features = None
-    if args.use_maia2_probs:
-        maia2_features = load_maia2_features(data_file_name, data_dir="./data")
-
-    # X_struct = build_features(df, "../filtered_struct_features.csv")
-    X_struct = build_features(df)
-    X_themes = encode_themes(df, themes_csv_path="../filtered_themes_only.csv")
-
-    y = df['Rating'].values
-
-    mask = np.ones(len(y), dtype=bool)
-    if args.min_rating is not None:
-        mask &= (y >= args.min_rating)
-    if args.max_rating is not None:
-        mask &= (y < args.max_rating)
-
-    X_struct, X_themes, stockfish_features, y, df, maia2_features, maia2_embeddings = apply_rating_mask(
-        mask, X_struct, X_themes, stockfish_features, y, df, maia2_features
-    )
+    X, y, df = dataset.load()
 
     n = len(df)
-    X_struct = X_struct[:n]
-    X_themes = X_themes[:n]
-    if stockfish_features is not None:
-        stockfish_features = stockfish_features[:n]
-    if maia2_features is not None:
-        maia2_features = maia2_features[:n]
-    y = y[:n]
 
-    rating_deviation = df['RatingDeviation'].values[:n].astype(np.float32) if 'RatingDeviation' in df.columns else None
+    rating_deviation = df['RatingDeviation'].values.astype(np.float32) if 'RatingDeviation' in df.columns else None
     sample_weights = None
     if args.use_sample_weights and rating_deviation is not None:
         sample_weights = (1.0 / np.maximum(rating_deviation, 1.0)).astype(np.float32)
 
-    advanced_features = build_advanced_features(df, data_file_name)
-    success_prob_features = build_success_prob_features(df)
-
     indices = np.arange(n)
     train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
     train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=42)
 
-    maia2_embeddings = None
-    if args.use_maia2_mlp and maia2_features is not None:
-        maia2_embeddings = load_or_train_mlp_embedder(
-            maia2_features[train_idx], y[train_idx],
-            maia2_features[val_idx], y[val_idx],
-            maia2_features,
-            input_dim=maia2_features.shape[1],
-            cache_dir="./data",
-            data_file_name=data_file_name,
-        )
-
-    X = prepare_features(
-        X_struct,
-        X_themes,
-        advanced_features,
-        success_prob_features,
-        stockfish_features,
-        maia2_features,
-        maia2_embeddings,
-        save_path=None,
-    )
     print(f"Total feature dimension: {X.shape[1]}")
-    print(f"  Struct features:    {X_struct.shape[1]}")
-    print(f"  Theme features:     {X_themes.shape[1]}")
-    print(f"  Advanced features:  {advanced_features.shape[1]}")
-    print(f"  Success prob stats: {success_prob_features.shape[1]}")
-    print(f"  Length feature:     included in struct")
-    if stockfish_features is not None:
-        print(f"  Stockfish features: {stockfish_features.shape[1]}")
-    if maia2_features is not None:
-        print(f"  Maia2 prob features:{maia2_features.shape[1]}")
-    if maia2_embeddings is not None:
-        print(f"  Maia2 MLP embeddings:{maia2_embeddings.shape[1]}")
-
-    indices = np.arange(n)
-    train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
-    train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=42)
 
     X_train, X_val, X_test = X[train_idx], X[val_idx], X[test_idx]
     y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
