@@ -100,29 +100,6 @@ if __name__ == "__main__":
         filter_rating_deviation=args.filter_rating_deviation,
         max_rows=args.max_rows,
     )
-    X, y, df = dataset.load()
-
-    n = len(df)
-
-    rating_deviation = df['RatingDeviation'].values.astype(np.float32) if 'RatingDeviation' in df.columns else None
-    sample_weights = None
-    if args.use_sample_weights and rating_deviation is not None:
-        sample_weights = (1.0 / np.maximum(rating_deviation, 1.0)).astype(np.float32)
-
-    indices = np.arange(n)
-    train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
-    train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=42)
-
-    print(f"Total feature dimension: {X.shape[1]}")
-
-    X_train, X_val, X_test = X[train_idx], X[val_idx], X[test_idx]
-    y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
-
-    print(
-        f"\nTraining {args.model_type} with "
-        f"{len(X_train)} train / {len(X_val)} val / {len(X_test)} test samples"
-    )
-
     model_params = {}
     interrupted = False
 
@@ -132,7 +109,30 @@ if __name__ == "__main__":
         mlflow.log_param("max_rating", args.max_rating)
         mlflow.log_param("filter_rating_deviation", args.filter_rating_deviation)
         mlflow.log_param("use_sample_weights", args.use_sample_weights)
-        mlflow.log_param("num_features", X.shape[1])
+
+        X, y, df = dataset.load()
+
+        n = len(df)
+
+        rating_deviation = df['RatingDeviation'].values.astype(np.float32) if 'RatingDeviation' in df.columns else None
+        sample_weights = None
+        if args.use_sample_weights and rating_deviation is not None:
+            sample_weights = (1.0 / np.maximum(rating_deviation, 1.0)).astype(np.float32)
+
+        indices = np.arange(n)
+        train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
+        train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=42)
+
+        print(f"Total feature dimension: {X.shape[1]}")
+
+        X_train, X_val, X_test = X[train_idx], X[val_idx], X[test_idx]
+        y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
+
+        print(
+            f"\nTraining {args.model_type} with "
+            f"{len(X_train)} train / {len(X_val)} val / {len(X_test)} test samples"
+        )
+
         mlflow.log_param("num_train", len(X_train))
         mlflow.log_param("num_val", len(X_val))
         mlflow.log_param("num_test", len(X_test))
