@@ -151,9 +151,11 @@ def evaluate_model(model, X_eval, y_eval):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--maia_source",
+        "--maia_sources",
+        nargs="+",
         required=True,
-        help="Which maia model to use. Examples: maia-1-1100, maia-2-1100, maia-2-rapid-1100, maia-2-blitz-1900",
+        help="One or more maia sources whose features are concatenated. "
+             "Examples: maia-1-1100  maia-2-1100  maia-2-rapid-1100",
     )
     parser.add_argument("--csv_path", default="../filtered.csv")
     parser.add_argument("--stockfish_path", default="../filtered_sf_evals.csv")
@@ -171,9 +173,11 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    maia_version, model_types, maia_elo = parse_maia_source(args.maia_source)
+    maia_version, model_types, maia_elo = parse_maia_source(args.maia_sources[0])
+    model_label = "__".join(s.replace("-", "_") for s in args.maia_sources)
     data_file_name = os.path.splitext(os.path.basename(args.csv_path))[0]
 
+    mlflow.set_tracking_uri("sqlite:///mlflow.db")
     mlflow.set_experiment("Chess_Puzzle_Maia_Specialists")
 
     dataset = ChessPuzzleDataset(
@@ -190,13 +194,16 @@ if __name__ == "__main__":
 
     X_base, y, df = dataset.load()
 
-    if maia_version == 1:
-        maia_features = load_maia1_elo_features(data_file_name, maia_elo, args.data_dir)
-    else:
-        maia_features = load_maia2_elo_features(data_file_name, maia_elo, model_types, args.data_dir)
+    maia_feature_parts = []
+    for source in args.maia_sources:
+        version, m_types, elo = parse_maia_source(source)
+        if version == 1:
+            maia_feature_parts.append(load_maia1_elo_features(data_file_name, elo, args.data_dir))
+        else:
+            maia_feature_parts.append(load_maia2_elo_features(data_file_name, elo, m_types, args.data_dir))
 
     row_count = len(df)
-    maia_features = maia_features[:row_count]
+    maia_features = np.concatenate([f[:row_count] for f in maia_feature_parts], axis=1)
     X = np.concatenate([X_base, maia_features], axis=1)
 
     n = len(df)
@@ -220,14 +227,12 @@ if __name__ == "__main__":
     y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
     train_weights = sample_weights[train_idx] if sample_weights is not None else None
 
-    print(f"maia_source={args.maia_source}  features={X.shape[1]}  train={len(X_train)}  val={len(X_val)}  test={len(X_test)}")
+    print(f"maia_sources={args.maia_sources}  features={X.shape[1]}  train={len(X_train)}  val={len(X_val)}  test={len(X_test)}")
 
     interrupted = False
     with mlflow.start_run() as run:
-        mlflow.log_param("maia_source", args.maia_source)
-        mlflow.log_param("maia_version", maia_version)
-        mlflow.log_param("maia_elo", maia_elo)
-        mlflow.log_param("model_types", str(model_types))
+        mlflow.log_param("maia_sources", " ".join(args.maia_sources))
+        mlflow.log_param("model_label", model_label)
         mlflow.log_param("filter_rating_deviation", args.filter_rating_deviation)
         mlflow.log_param("num_train", len(X_train))
         mlflow.log_param("num_val", len(X_val))
@@ -255,11 +260,10 @@ if __name__ == "__main__":
         mlflow.log_metric("val_rmse", val_rmse)
         mlflow.log_metric("test_rmse", test_rmse)
 
-        mlflow.lightgbm.log_model(model, f"lgbm_{args.maia_source}")
+        mlflow.lightgbm.log_model(model, f"lgbm_{model_label}")
 
         os.makedirs(SPECIALISTS_DIR, exist_ok=True)
-        safe_source = args.maia_source.replace("-", "_")
-        model_path = os.path.join(SPECIALISTS_DIR, f"{safe_source}_lgbm.pkl")
+        model_path = os.path.join(SPECIALISTS_DIR, f"{model_label}_lgbm.pkl")
         joblib.dump(model, model_path)
 
         status = "interrupted" if interrupted else "complete"
@@ -273,7 +277,8 @@ if __name__ == "__main__":
         results_dir = f"./results/{data_file_name}"
         os.makedirs(results_dir, exist_ok=True)
         pd.DataFrame([{
-            "maia_source": args.maia_source,
+            "maia_sources": " ".join(args.maia_sources),
+            "model_label": model_label,
             "interrupted": interrupted,
             "train_mse": train_mse,
             "train_rmse": train_rmse,
@@ -283,4 +288,4 @@ if __name__ == "__main__":
             "test_rmse": test_rmse,
             "model_path": model_path,
             "mlflow_run_id": run.info.run_id,
-        }]).to_csv(f"{results_dir}/specialist_{safe_source}.csv", index=False)
+        }]).to_csv(f"{results_dir}/specialist_{model_label}.csv", index=False)
