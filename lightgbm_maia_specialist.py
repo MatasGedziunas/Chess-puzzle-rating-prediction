@@ -163,6 +163,12 @@ if __name__ == "__main__":
     parser.add_argument("--filter_rating_deviation", action="store_true", default=True)
     parser.add_argument("--use_sample_weights", action="store_true", default=False)
     parser.add_argument("--device", default="cuda", help="Device for LightGBM: cuda or cpu")
+    parser.add_argument(
+        "--splits_path",
+        default=None,
+        help="Path to .npz file with train_idx/val_idx/test_idx (e.g. ./data/filtered_splits.npz). "
+             "If not provided, splits are recomputed with the default random seed.",
+    )
     args = parser.parse_args()
 
     maia_version, model_types, maia_elo = parse_maia_source(args.maia_source)
@@ -199,9 +205,16 @@ if __name__ == "__main__":
     if args.use_sample_weights and rating_deviation is not None:
         sample_weights = (1.0 / np.maximum(rating_deviation, 1.0)).astype(np.float32)
 
-    indices = np.arange(n)
-    train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
-    train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=42)
+    if args.splits_path and os.path.exists(args.splits_path):
+        splits = np.load(args.splits_path)
+        train_idx = splits["train_idx"]
+        val_idx = splits["val_idx"]
+        test_idx = splits["test_idx"]
+        print(f"Loaded splits from {args.splits_path}")
+    else:
+        indices = np.arange(n)
+        train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
+        train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=42)
 
     X_train, X_val, X_test = X[train_idx], X[val_idx], X[test_idx]
     y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]

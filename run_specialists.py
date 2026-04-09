@@ -17,6 +17,7 @@ COMMON_ARGS = {
     "--themes_csv_path": "../filtered_themes_only.csv",
     "--data_dir": "./data",
     "--max_rows": "200000",
+    "--splits_path": "./data/filtered_splits.npz",
 }
 
 DEVICES = ["cuda:0", "cuda:1"]
