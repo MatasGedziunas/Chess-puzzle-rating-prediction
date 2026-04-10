@@ -1,138 +1,190 @@
 import os
+import sys
 import argparse
 import numpy as np
 import pandas as pd
-import xgboost as xgb
+import joblib
 import mlflow
 from catboost import CatBoostRegressor, Pool
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
-from dataset.board_features import build_features, encode_themes
 
-def prepare_features(X_struct, X_themes, move_lengths, stockfish_features=None):
-    lengths_2d = move_lengths.reshape(-1, 1).astype(np.float32)
-    X = np.concatenate([X_struct, X_themes, lengths_2d], axis=1)
-    if stockfish_features is not None:
-        X = np.concatenate([X, stockfish_features], axis=1)
-    return X
+sys.path.insert(0, os.path.dirname(__file__))
 
-def load_best_model_for_range(runs, min_rating, max_rating, suffix):
-    if min_rating is None:
-        mask = runs['params.min_rating'].isnull() | (runs['params.min_rating'] == 'None')
-    else:
-        mask = runs['params.min_rating'] == str(min_rating)
-        
-    if max_rating is None:
-        mask &= runs['params.max_rating'].isnull() | (runs['params.max_rating'] == 'None')
-    else:
-        mask &= runs['params.max_rating'] == str(max_rating)
-        
-    matching_runs = runs[mask]
-    if len(matching_runs) == 0:
-        raise ValueError(f"No models found for range {min_rating} to {max_rating}")
-        
-    best_run = matching_runs.sort_values("metrics.val_rmse", ascending=True).iloc[0]
-    return mlflow.xgboost.load_model(f"runs:/{best_run['run_id']}/xgboost_baseline_model{suffix}")
+from dataset.chess_puzzle_dataset import ChessPuzzleDataset
+from lightgbm_maia_specialist import parse_maia_source, load_maia1_elo_features, load_maia2_elo_features
 
-def get_base_predictions(models, X):
+SPECIALISTS_DIR = "./models/specialists"
+
+
+def label_to_sources(model_filename):
+    label = model_filename.replace("_lgbm.pkl", "")
+    return [s.replace("_", "-") for s in label.split("__")]
+
+
+def load_specialists(specialists_dir):
+    specialists = {}
+    for fname in sorted(os.listdir(specialists_dir)):
+        if not fname.endswith("_lgbm.pkl"):
+            continue
+        path = os.path.join(specialists_dir, fname)
+        label = fname.replace("_lgbm.pkl", "")
+        sources = label_to_sources(fname)
+        specialists[label] = (joblib.load(path), sources)
+        print(f"  Loaded: {fname}  sources={sources}")
+    return specialists
+
+
+def build_specialist_X(sources, data_file_name, X_base, data_dir):
+    row_count = len(X_base)
+    parts = []
+    for source in sources:
+        version, model_types, elo = parse_maia_source(source)
+        if version == 1:
+            parts.append(load_maia1_elo_features(data_file_name, elo, data_dir)[:row_count])
+        else:
+            parts.append(load_maia2_elo_features(data_file_name, elo, model_types, data_dir)[:row_count])
+    return np.concatenate([X_base] + parts, axis=1)
+
+
+def collect_predictions(specialists, data_file_name, X_base, data_dir):
     preds = {}
-    for name, model in models.items():
-        preds[name] = model.predict(X)
+    for label, (model, sources) in specialists.items():
+        X = build_specialist_X(sources, data_file_name, X_base, data_dir)
+        preds[label] = model.predict(X).astype(np.float32)
+        print(f"  {label}: {preds[label].shape[0]} predictions")
     return preds
-    
-def create_meta_features(predictions, base_features):
-    pred_stack = np.column_stack([
-        predictions['model_low'],
-        predictions['model_mid'],
-        predictions['model_high']
-    ])
-    
-    pred_mean = np.mean(pred_stack, axis=1).reshape(-1, 1)
-    pred_std = np.std(pred_stack, axis=1).reshape(-1, 1)
-    pred_max = np.max(pred_stack, axis=1).reshape(-1, 1)
-    pred_min = np.min(pred_stack, axis=1).reshape(-1, 1)
-    
-    diff_mid_low = np.abs(predictions['model_mid'] - predictions['model_low']).reshape(-1, 1)
-    diff_high_mid = np.abs(predictions['model_high'] - predictions['model_mid']).reshape(-1, 1)
-    diff_high_low = np.abs(predictions['model_high'] - predictions['model_low']).reshape(-1, 1)
-    
-    return np.concatenate([
-        base_features, 
-        pred_stack, 
-        pred_mean, pred_std, pred_max, pred_min,
-        diff_mid_low, diff_high_mid, diff_high_low
-    ], axis=1)
+
+
+def build_meta_features(predictions, X_base):
+    pred_matrix = np.column_stack(list(predictions.values()))
+    pred_mean = pred_matrix.mean(axis=1, keepdims=True)
+    pred_std = pred_matrix.std(axis=1, keepdims=True)
+    pred_min = pred_matrix.min(axis=1, keepdims=True)
+    pred_max = pred_matrix.max(axis=1, keepdims=True)
+    return np.concatenate(
+        [X_base, pred_matrix, pred_mean, pred_std, pred_min, pred_max], axis=1
+    ).astype(np.float32)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_rows", type=int, default=60000)
+    parser.add_argument("--csv_path", default="../filtered.csv")
+    parser.add_argument("--stockfish_path", default="../filtered_sf_evals.csv")
+    parser.add_argument("--themes_csv_path", default="../filtered_themes_only.csv")
+    parser.add_argument("--data_dir", default="./data")
+    parser.add_argument("--specialists_dir", default=SPECIALISTS_DIR)
+    parser.add_argument("--splits_path", default="./data/filtered_splits.npz")
+    parser.add_argument("--filter_rating_deviation", action="store_true", default=True)
+    parser.add_argument("--task_type", default="GPU", choices=["GPU", "CPU"])
     args = parser.parse_args()
-    
-    df_train_ids = set(pd.read_csv("./data/p200k.csv", usecols=["PuzzleId"])["PuzzleId"])
-    df_holdout = pd.read_csv("../filtered.csv")
-    df_holdout = df_holdout[~df_holdout["PuzzleId"].isin(df_train_ids)].copy()
-    df_holdout = df_holdout.head(args.num_rows)
-    
-    y = df_holdout['Rating'].values
-    
-    X_struct = build_features(df_holdout)
-    move_lengths = df_holdout['Moves'].apply(lambda x: len(str(x).split())).values
-    X_themes = encode_themes(df_holdout)
-    stockfish_features = './data/p200k_sf_evals.csv'  
-    
-    X_base = prepare_features(X_struct, X_themes, move_lengths, stockfish_features)
-    
-    mlflow.set_tracking_uri("sqlite:///mlflow.db") 
-    runs = mlflow.search_runs(experiment_names=["Chess_Puzzle_Rating_Prediction"])
-    
-    models = {
-        'model_low': load_best_model_for_range(runs, None, 1200, "_minto1200"),
-        'model_mid': load_best_model_for_range(runs, 1200, 1800, "_1200to1800"),
-        'model_high': load_best_model_for_range(runs, 1800, None, "_1800tomax")
-    }
-    
-    predictions = get_base_predictions(models, X_base)
-    X_meta = create_meta_features(predictions, X_base)
-    
-    X_train, X_val, y_train, y_val = train_test_split(X_meta, y, test_size=0.1, random_state=42)
-    
-    train_pool = Pool(X_train, y_train)
-    val_pool = Pool(X_val, y_val)
-    
+
+    data_file_name = os.path.splitext(os.path.basename(args.csv_path))[0]
+
+    mlflow.set_tracking_uri("sqlite:///mlflow.db")
+    mlflow.set_experiment("Chess_Puzzle_Maia_Specialists")
+
+    dataset = ChessPuzzleDataset(
+        csv_path=args.csv_path,
+        data_dir=args.data_dir,
+        stockfish_path=args.stockfish_path,
+        themes_csv_path=args.themes_csv_path,
+        use_maia1=False,
+        use_maia2=False,
+        use_maia2_mlp=False,
+        filter_rating_deviation=args.filter_rating_deviation,
+        max_rows=None,
+    )
+
+    X_base, y, df = dataset.load()
+    n = len(df)
+
+    if args.splits_path and os.path.exists(args.splits_path):
+        splits = np.load(args.splits_path)
+        train_idx = splits["train_idx"]
+        val_idx = splits["val_idx"]
+        test_idx = splits["test_idx"]
+        print(f"Loaded splits from {args.splits_path}")
+    else:
+        indices = np.arange(n)
+        train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
+        train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=42)
+
+    print(f"\nLoading specialist models from {args.specialists_dir}...")
+    specialists = load_specialists(args.specialists_dir)
+    if not specialists:
+        raise FileNotFoundError(f"No specialist models found in {args.specialists_dir}")
+
+    print(f"\nGenerating predictions from {len(specialists)} specialists...")
+    predictions = collect_predictions(specialists, data_file_name, X_base, args.data_dir)
+
+    X_meta = build_meta_features(predictions, X_base)
+    print(f"\nMeta features shape: {X_meta.shape}")
+
+    X_train = X_meta[train_idx]
+    X_val = X_meta[val_idx]
+    X_test = X_meta[test_idx]
+    y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
+
+    print(f"Train: {len(X_train)}  Val: {len(X_val)}  Test: {len(X_test)}")
+
     catboost_params = {
-        'iterations': 5000,
-        'learning_rate': 0.05,
-        'depth': 6,
-        'loss_function': 'RMSE',
-        'eval_metric': 'RMSE',
-        'early_stopping_rounds': 100,
-        'task_type': 'CPU',
-        'verbose': 200,
-        'random_seed': 42
+        "iterations": 5000,
+        "learning_rate": 0.05,
+        "depth": 6,
+        "loss_function": "RMSE",
+        "eval_metric": "RMSE",
+        "early_stopping_rounds": 100,
+        "task_type": args.task_type,
+        "verbose": 200,
+        "random_seed": 42,
     }
-    
-    meta_model = CatBoostRegressor(**catboost_params)
-    meta_model.fit(train_pool, eval_set=val_pool, use_best_model=True)
-    
-    val_preds = meta_model.predict(X_val)
-    val_mse = mean_squared_error(y_val, val_preds)
-    val_rmse = np.sqrt(val_mse)
-    
-    meta_model.save_model("catboost_meta_ensemble.cbm")
-    
-    out_dir = "./results/ensamble"
-    os.makedirs(out_dir, exist_ok=True)
-    
-    results_df = pd.DataFrame([{
-        'Holdout_Size': len(df_holdout),
-        'Num_Rows_Requested': args.num_rows,
-        'CatBoost_Iterations': catboost_params['iterations'],
-        'CatBoost_Depth': catboost_params['depth'],
-        'Validation_MSE': val_mse,
-        'Validation_RMSE': val_rmse,
-        'Best_Iteration': meta_model.get_best_iteration()
-    }])
-    
-    csv_path = f"{out_dir}/catboost_results_holdout_{len(df_holdout)}rows.csv"
-    results_df.to_csv(csv_path, index=False)
-    print(f"MSE: {val_mse:.2f} | RMSE: {val_rmse:.2f} | Saved to: {csv_path}")
+
+    with mlflow.start_run() as run:
+        mlflow.log_param("specialists", " | ".join(specialists.keys()))
+        mlflow.log_param("num_specialists", len(specialists))
+        mlflow.log_param("meta_features", X_meta.shape[1])
+        mlflow.log_param("num_train", len(X_train))
+        mlflow.log_param("num_val", len(X_val))
+        mlflow.log_param("num_test", len(X_test))
+        for k, v in catboost_params.items():
+            mlflow.log_param(k, v)
+
+        meta_model = CatBoostRegressor(**catboost_params)
+        meta_model.fit(Pool(X_train, y_train), eval_set=Pool(X_val, y_val), use_best_model=True)
+
+        val_preds = meta_model.predict(X_val)
+        val_mse = mean_squared_error(y_val, val_preds)
+        val_rmse = np.sqrt(val_mse)
+
+        test_preds = meta_model.predict(X_test)
+        test_mse = mean_squared_error(y_test, test_preds)
+        test_rmse = np.sqrt(test_mse)
+
+        mlflow.log_metric("val_mse", val_mse)
+        mlflow.log_metric("val_rmse", val_rmse)
+        mlflow.log_metric("test_mse", test_mse)
+        mlflow.log_metric("test_rmse", test_rmse)
+
+        os.makedirs("./models", exist_ok=True)
+        model_path = "./models/catboost_specialist_ensemble.cbm"
+        meta_model.save_model(model_path)
+
+        print(f"\nVal  MSE: {val_mse:.2f} (RMSE: {val_rmse:.2f})")
+        print(f"Test MSE: {test_mse:.2f} (RMSE: {test_rmse:.2f})")
+        print(f"Saved -> {model_path}")
+        print(f"MLflow run -> {run.info.run_id}")
+
+        out_dir = "./results/ensemble"
+        os.makedirs(out_dir, exist_ok=True)
+        pd.DataFrame([{
+            "num_specialists": len(specialists),
+            "specialists": " | ".join(specialists.keys()),
+            "val_mse": val_mse,
+            "val_rmse": val_rmse,
+            "test_mse": test_mse,
+            "test_rmse": test_rmse,
+            "best_iteration": meta_model.get_best_iteration(),
+            "model_path": model_path,
+            "mlflow_run_id": run.info.run_id,
+        }]).to_csv(f"{out_dir}/catboost_ensemble_results.csv", index=False)
