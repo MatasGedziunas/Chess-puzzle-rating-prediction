@@ -240,9 +240,9 @@ if __name__ == "__main__":
 
     interrupted = False
     with mlflow.start_run() as run:
-        mlflow.log_param("maia_sources", " ".join(args.maia_sources))
+        mlflow.log_params(vars(args))
         mlflow.log_param("model_label", model_label)
-        mlflow.log_param("filter_rating_deviation", args.filter_rating_deviation)
+        mlflow.log_param("blocks_str", " ".join(args.blocks))
         mlflow.log_param("num_train", len(X_train))
         mlflow.log_param("num_val", len(X_val))
         mlflow.log_param("num_test", len(X_test))
@@ -285,9 +285,11 @@ if __name__ == "__main__":
 
         results_dir = f"./results/{data_file_name}"
         os.makedirs(results_dir, exist_ok=True)
+        blocks_suffix = "_".join(args.blocks)
         pd.DataFrame([{
             "maia_sources": " ".join(args.maia_sources),
             "model_label": model_label,
+            "blocks": " ".join(args.blocks),
             "interrupted": interrupted,
             "train_mse": train_mse,
             "train_rmse": train_rmse,
@@ -297,4 +299,4 @@ if __name__ == "__main__":
             "test_rmse": test_rmse,
             "model_path": model_path,
             "mlflow_run_id": run.info.run_id,
-        }]).to_csv(f"{results_dir}/specialist_{model_label}.csv", index=False)
+        }]).to_csv(f"{results_dir}/specialist_{model_label}__{blocks_suffix}.csv", index=False)
