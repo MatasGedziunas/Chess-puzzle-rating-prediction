@@ -161,10 +161,18 @@ if __name__ == "__main__":
     parser.add_argument("--stockfish_path", default="../filtered_sf_evals.csv")
     parser.add_argument("--themes_csv_path", default="../filtered_themes_only.csv")
     parser.add_argument("--data_dir", default="./data")
-    parser.add_argument("--max_rows", type=int, default=200000)
+    parser.add_argument("--max_rows", type=int, default=None)
     parser.add_argument("--filter_rating_deviation", action="store_true", default=True)
     parser.add_argument("--use_sample_weights", action="store_true", default=False)
     parser.add_argument("--device", default="cuda", help="Device for LightGBM: cuda or cpu")
+    parser.add_argument(
+        "--blocks",
+        nargs="+",
+        default=["struct", "themes", "advanced", "stockfish", "maia1", "maia2"],
+        help="Explicit list of base feature blocks to include. "
+             "Available: struct themes advanced stockfish maia1 maia2 maia2_mlp. "
+             "Overrides the default flag-based selection when set.",
+    )
     parser.add_argument(
         "--splits_path",
         default=None,
@@ -190,6 +198,7 @@ if __name__ == "__main__":
         use_maia2_mlp=False,
         filter_rating_deviation=args.filter_rating_deviation,
         max_rows=args.max_rows,
+        blocks=args.blocks,
     )
 
     X_base, y, df = dataset.load()

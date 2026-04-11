@@ -22,6 +22,7 @@ class ChessPuzzleDataset:
         use_maia2_mlp=False,
         filter_rating_deviation=True,
         max_rows=None,
+        blocks=None,
     ):
         self.csv_path = csv_path
         self.data_dir = data_dir
@@ -32,6 +33,7 @@ class ChessPuzzleDataset:
         self.use_maia2_mlp = use_maia2_mlp
         self.filter_rating_deviation = filter_rating_deviation
         self.max_rows = max_rows
+        self.blocks = blocks
         self.data_file_name = os.path.splitext(os.path.basename(csv_path))[0]
 
     def _cache_path(self):
@@ -43,6 +45,8 @@ class ChessPuzzleDataset:
         return os.path.join(self.data_dir, f"{self.data_file_name}_features{suffix}.npz")
 
     def _requested_blocks(self):
+        if self.blocks is not None:
+            return list(self.blocks)
         blocks = ["struct", "themes", "advanced"]
         if self.stockfish_path:
             blocks.append("stockfish")
@@ -101,12 +105,15 @@ class ChessPuzzleDataset:
 
         if os.path.exists(cache_path):
             cached = np.load(cache_path, allow_pickle=True)
-            manifest = json.loads(str(cached["manifest"]))
-            y = cached["y"]
-            df = pd.DataFrame(cached["df_records"].item())
-            for name in manifest:
-                cached_blocks[name] = cached[f"block_{name}"]
-            print(f"Cache hit: {list(manifest.keys())} blocks, {y.shape[0]} rows")
+            if "manifest" not in cached:
+                print(f"Stale cache (no manifest) at {cache_path}, ignoring.")
+            else:
+                manifest = json.loads(str(cached["manifest"]))
+                y = cached["y"]
+                df = pd.DataFrame(list(cached["df_records"]))
+                for name in manifest:
+                    cached_blocks[name] = cached[f"block_{name}"]
+                print(f"Cache hit: {list(manifest.keys())} blocks, {y.shape[0]} rows")
 
         missing = [name for name in requested if name not in manifest]
 
@@ -136,7 +143,7 @@ class ChessPuzzleDataset:
 
             save_dict = {
                 "y": y,
-                "df_records": np.array(df.to_dict("records"), dtype=object),
+                "df_records": np.array(df.to_dict("records"), dtype=object).reshape(-1),
                 "manifest": np.array(json.dumps(manifest)),
             }
             for name, block in cached_blocks.items():
