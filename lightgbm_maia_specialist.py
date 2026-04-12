@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+import gc
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -54,7 +55,7 @@ def load_maia1_elo_features(data_file_name, elo, data_dir="./data"):
     if not os.path.exists(probs_path):
         raise FileNotFoundError(f"Maia1 probs not found: {probs_path}")
 
-    probs = np.load(probs_path)[:, :, elo_idx:elo_idx + 1]
+    probs = np.load(probs_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1]
     feature_parts = [_derive_flat_features(probs)]
 
     top5p_path = os.path.join(data_dir, f"{data_file_name}_maia1_top5_probs.npy")
@@ -62,9 +63,9 @@ def load_maia1_elo_features(data_file_name, elo, data_dir="./data"):
     pidx_path = os.path.join(data_dir, f"{data_file_name}_maia1_policy_indices.npy")
 
     if all(os.path.exists(p) for p in [top5p_path, top5i_path, pidx_path]):
-        top5_probs = np.load(top5p_path)[:, :, elo_idx:elo_idx + 1, :]
-        top5_indices = np.load(top5i_path)[:, :, elo_idx:elo_idx + 1, :]
-        policy_indices = np.load(pidx_path)
+        top5_probs = np.load(top5p_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1, :]
+        top5_indices = np.load(top5i_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1, :]
+        policy_indices = np.load(pidx_path, mmap_mode="r")
 
         rank = _compute_correct_move_rank(probs, top5_indices, policy_indices)
         gap_to_top1 = top5_probs[:, :, :, 0] - probs
@@ -88,7 +89,7 @@ def load_maia2_elo_features(data_file_name, elo, model_types, data_dir="./data")
             print(f"Warning: {probs_path} not found, skipping {model_type}")
             continue
 
-        probs = np.load(probs_path)[:, :, elo_idx:elo_idx + 1]
+        probs = np.load(probs_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1]
         top5p_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_top5_probs.npy")
         top5i_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_top5_indices.npy")
         pidx_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_policy_indices.npy")
@@ -96,12 +97,12 @@ def load_maia2_elo_features(data_file_name, elo, model_types, data_dir="./data")
         bce_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_side_info_bce.npy")
         val_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_value.npy")
 
-        top5_probs = np.load(top5p_path)[:, :, elo_idx:elo_idx + 1, :]
-        top5_indices = np.load(top5i_path)[:, :, elo_idx:elo_idx + 1, :]
-        policy_indices = np.load(pidx_path)
-        move_ce = np.load(ce_path)[:, :, elo_idx:elo_idx + 1] if os.path.exists(ce_path) else None
-        side_info_bce = np.load(bce_path)[:, :, elo_idx:elo_idx + 1] if os.path.exists(bce_path) else None
-        value_output = np.load(val_path)[:, :, elo_idx:elo_idx + 1] if os.path.exists(val_path) else None
+        top5_probs = np.load(top5p_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1, :]
+        top5_indices = np.load(top5i_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1, :]
+        policy_indices = np.load(pidx_path, mmap_mode="r")
+        move_ce = np.load(ce_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1] if os.path.exists(ce_path) else None
+        side_info_bce = np.load(bce_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1] if os.path.exists(bce_path) else None
+        value_output = np.load(val_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1] if os.path.exists(val_path) else None
 
         features = _derive_maia2_extended_features(
             probs, top5_probs, top5_indices, policy_indices, move_ce, side_info_bce, value_output
@@ -112,6 +113,10 @@ def load_maia2_elo_features(data_file_name, elo, model_types, data_dir="./data")
         raise FileNotFoundError(f"No maia2 prob files found for model_types={model_types} in {data_dir}")
 
     return np.concatenate(parts, axis=1).astype(np.float32)
+
+
+def slice_feature_parts(feature_parts, indices):
+    return np.concatenate([part[indices] for part in feature_parts], axis=1).astype(np.float32)
 
 
 def train_lightgbm(X_train, y_train, X_val, y_val, sample_weights=None, device="cuda"):
@@ -211,10 +216,6 @@ if __name__ == "__main__":
         else:
             maia_feature_parts.append(load_maia2_elo_features(data_file_name, elo, m_types, args.data_dir))
 
-    row_count = len(df)
-    maia_features = np.concatenate([f[:row_count] for f in maia_feature_parts], axis=1)
-    X = np.concatenate([X_base, maia_features], axis=1)
-
     n = len(df)
     rating_deviation = df["RatingDeviation"].values.astype(np.float32) if "RatingDeviation" in df.columns else None
     sample_weights = None
@@ -232,11 +233,27 @@ if __name__ == "__main__":
         train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
         train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=42)
 
-    X_train, X_val, X_test = X[train_idx], X[val_idx], X[test_idx]
+    row_count = len(df)
+    feature_parts = [X_base]
+    feature_parts.extend(f[:row_count] for f in maia_feature_parts)
+    total_features = sum(part.shape[1] for part in feature_parts)
+    print(f"Preparing split matrices with {total_features} features across {row_count} rows ")
+
+    X_train = slice_feature_parts(feature_parts, train_idx)
+    X_val = slice_feature_parts(feature_parts, val_idx)
+    X_test = slice_feature_parts(feature_parts, test_idx)
     y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
     train_weights = sample_weights[train_idx] if sample_weights is not None else None
 
-    print(f"maia_sources={args.maia_sources}  features={X.shape[1]}  train={len(X_train)}  val={len(X_val)}  test={len(X_test)}")
+    del X_base
+    del maia_feature_parts
+    del feature_parts
+    gc.collect()
+
+    print(
+        f"maia_sources={args.maia_sources}  features={total_features}  "
+        f"train={len(X_train)}  val={len(X_val)}  test={len(X_test)}"
+    )
 
     interrupted = False
     with mlflow.start_run() as run:
