@@ -158,7 +158,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--maia_sources",
         nargs="+",
-        required=True,
+        default=["maia-1-1100", "maia-1-1300", "maia-1-1500", "maia-1-1700", "maia-1-1900",
+                "maia-2-1100", "maia-2-1300", "maia-2-1500", "maia-2-1700", "maia-2-1900"]
         help="One or more maia sources whose features are concatenated. "
              "Examples: maia-1-1100  maia-2-1100  maia-2-rapid-1100",
     )
