@@ -7,6 +7,7 @@ import pandas as pd
 import lightgbm as lgb
 import mlflow
 import joblib
+import optuna
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 
@@ -109,34 +110,90 @@ def load_maia2_elo_features(data_file_name, elo, model_types, data_dir="./data")
     return np.concatenate(parts, axis=1).astype(np.float32)
 
 
-def train_lightgbm(X_train, y_train, X_val, y_val, sample_weights=None, device="cuda"):
-    evals_result = {}
+def build_lgb_params(device="cuda", overrides=None):
     params = {
         "n_estimators": 5000,
         "learning_rate": 0.05,
         "num_leaves": 63,
         "min_child_samples": 20,
         "objective": "regression",
-        "metric": "mse",
+        "metric": ["mse", "rmse"],
         "random_state": 42,
         "verbosity": -1,
         "device": device,
         "max_bin": 255,
     }
+    if overrides:
+        params.update(overrides)
+    return params
+
+
+def train_lightgbm(X_train, y_train, X_val, y_val, sample_weights=None, device="cuda", overrides=None, verbose=True):
+    evals_result = {}
+    params = build_lgb_params(device=device, overrides=overrides)
     model = lgb.LGBMRegressor(**params)
+    callbacks = [
+        lgb.record_evaluation(evals_result),
+        lgb.early_stopping(stopping_rounds=100, verbose=verbose),
+    ]
+    if verbose:
+        callbacks.append(lgb.log_evaluation(period=100))
     model.fit(
         X_train,
         y_train,
         sample_weight=sample_weights,
         eval_set=[(X_train, y_train), (X_val, y_val)],
         eval_names=["train", "val"],
-        callbacks=[
-            lgb.record_evaluation(evals_result),
-            lgb.early_stopping(stopping_rounds=100, verbose=True),
-            lgb.log_evaluation(period=100),
-        ],
+        callbacks=callbacks,
     )
     return model, params, evals_result
+
+
+def tune_lightgbm_with_optuna(X_train, y_train, X_val, y_val, sample_weights=None, device="cuda", n_trials=20):
+    default_overrides = {
+        "learning_rate": 0.05,
+        "num_leaves": 63,
+        "min_child_samples": 20,
+        "feature_fraction": 1.0,
+        "bagging_fraction": 1.0,
+        "bagging_freq": 1,
+        "lambda_l1": 1e-8,
+        "lambda_l2": 1e-8,
+        "max_bin": 255,
+    }
+
+    def objective(trial):
+        overrides = {
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 31, 255),
+            "min_child_samples": trial.suggest_int("min_child_samples", 5, 100),
+            "feature_fraction": trial.suggest_float("feature_fraction", 0.6, 1.0),
+            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.6, 1.0),
+            "bagging_freq": trial.suggest_int("bagging_freq", 1, 10),
+            "lambda_l1": trial.suggest_float("lambda_l1", 1e-8, 10.0, log=True),
+            "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 10.0, log=True),
+            "max_bin": trial.suggest_categorical("max_bin", [127, 255, 511]),
+        }
+        model, _, _ = train_lightgbm(
+            X_train,
+            y_train,
+            X_val,
+            y_val,
+            sample_weights=sample_weights,
+            device=device,
+            overrides=overrides,
+            verbose=False,
+        )
+        preds = model.predict(X_val)
+        val_mse = mean_squared_error(y_val, preds)
+        val_rmse = float(np.sqrt(val_mse))
+        trial.set_user_attr("val_rmse", val_rmse)
+        return val_mse
+
+    study = optuna.create_study(direction="minimize")
+    study.enqueue_trial(default_overrides)
+    study.optimize(objective, n_trials=n_trials)
+    return study
 
 
 def evaluate_model(model, X_eval, y_eval):
@@ -169,6 +226,7 @@ if __name__ == "__main__":
     parser.add_argument("--filter_rating_deviation", action="store_true", default=True)
     parser.add_argument("--use_sample_weights", action="store_true", default=False)
     parser.add_argument("--device", default="cuda", help="Device for LightGBM: cuda or cpu")
+    parser.add_argument("--optuna_trials", type=int, default=0, help="Run Optuna hyperparameter search before final training.")
     parser.add_argument(
         "--blocks",
         nargs="+",
@@ -189,8 +247,6 @@ if __name__ == "__main__":
         parser.error("--use_specialist_maia_features requires --maia_sources")
 
     specialist_label = "__".join(s.replace("-", "_") for s in args.maia_sources) if args.maia_sources else "standard"
-    blocks_label = "_".join(dataset_blocks) if 'dataset_blocks' in locals() else ""
-    model_label = specialist_label if args.use_specialist_maia_features else f"base__{blocks_label}"
     data_file_name = os.path.splitext(os.path.basename(args.csv_path))[0]
     dataset_blocks = [block for block in args.blocks if block not in {"maia1", "maia2"}] if args.use_specialist_maia_features else args.blocks
     blocks_label = "_".join(dataset_blocks)
@@ -269,6 +325,7 @@ if __name__ == "__main__":
         mlflow.log_param("num_val", len(X_val))
         mlflow.log_param("num_test", len(X_test))
         mlflow.log_param("use_specialist_maia_features", args.use_specialist_maia_features)
+        mlflow.log_param("optuna_trials", args.optuna_trials)
         if args.use_specialist_maia_features:
             mlflow.log_param("specialist_maia_sources", " ".join(args.maia_sources))
 
@@ -276,7 +333,37 @@ if __name__ == "__main__":
         model_params = {}
         evals_result = {}
         try:
-            model, model_params, evals_result = train_lightgbm(X_train, y_train, X_val, y_val, train_weights, args.device)
+            best_overrides = None
+            if args.optuna_trials > 0:
+                study = tune_lightgbm_with_optuna(
+                    X_train,
+                    y_train,
+                    X_val,
+                    y_val,
+                    sample_weights=train_weights,
+                    device=args.device,
+                    n_trials=args.optuna_trials,
+                )
+                optuna_results_dir = f"./results/{data_file_name}"
+                os.makedirs(optuna_results_dir, exist_ok=True)
+                optuna_trials_path = os.path.join(optuna_results_dir, f"optuna_trials_{model_label}.csv")
+                study.trials_dataframe().to_csv(optuna_trials_path, index=False)
+                best_overrides = study.best_trial.params
+                mlflow.log_metric("optuna_best_val_mse", study.best_value)
+                if "val_rmse" in study.best_trial.user_attrs:
+                    mlflow.log_metric("optuna_best_val_rmse", study.best_trial.user_attrs["val_rmse"])
+                mlflow.log_params({f"optuna_{k}": v for k, v in best_overrides.items()})
+                mlflow.log_param("optuna_trials_csv", optuna_trials_path)
+
+            model, model_params, evals_result = train_lightgbm(
+                X_train,
+                y_train,
+                X_val,
+                y_val,
+                train_weights,
+                args.device,
+                overrides=best_overrides,
+            )
         except KeyboardInterrupt:
             interrupted = True
             print("\nTraining interrupted. Saving partial results...")
