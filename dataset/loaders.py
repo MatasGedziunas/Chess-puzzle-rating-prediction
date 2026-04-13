@@ -49,7 +49,7 @@ def _reduce_move_elo(arr):
     ], axis=1).astype(np.float32)
 
 
-def _derive_maia2_extended_features(probs, top5_probs, top5_indices, policy_indices, move_ce=None, side_info_bce=None, value_output=None):
+def _derive_maia2_extended_features(probs, top5_probs, top5_indices, policy_indices):
     from .maia1_probs import _derive_flat_features
     eps = 1e-7
 
@@ -63,12 +63,6 @@ def _derive_maia2_extended_features(probs, top5_probs, top5_indices, policy_indi
         _reduce_move_elo(gap_to_top1),
         _reduce_move_elo(prob_ratio),
     ]
-    if move_ce is not None:
-        feature_parts.append(_reduce_move_elo(move_ce))
-    if side_info_bce is not None:
-        feature_parts.append(_reduce_move_elo(side_info_bce))
-    if value_output is not None:
-        feature_parts.append(_reduce_move_elo(value_output))
 
     return np.concatenate(feature_parts, axis=1)
 
@@ -80,9 +74,6 @@ def load_maia2_features(data_file_name, data_dir="./data"):
         top5p_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_top5_probs.npy")
         top5i_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_top5_indices.npy")
         pidx_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_policy_indices.npy")
-        ce_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_move_ce.npy")
-        bce_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_side_info_bce.npy")
-        val_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_value.npy")
 
         if not os.path.exists(probs_path):
             print(f"Warning: {probs_path} not found, skipping {model_type} maia2 features")
@@ -92,11 +83,8 @@ def load_maia2_features(data_file_name, data_dir="./data"):
         top5_probs = np.load(top5p_path)
         top5_indices = np.load(top5i_path)
         policy_indices = np.load(pidx_path)
-        move_ce = np.load(ce_path) if os.path.exists(ce_path) else None
-        side_info_bce = np.load(bce_path) if os.path.exists(bce_path) else None
-        value_output = np.load(val_path) if os.path.exists(val_path) else None
 
-        parts.append(_derive_maia2_extended_features(probs, top5_probs, top5_indices, policy_indices, move_ce, side_info_bce, value_output))
+        parts.append(_derive_maia2_extended_features(probs, top5_probs, top5_indices, policy_indices))
 
     return np.concatenate(parts, axis=1) if parts else None
 
