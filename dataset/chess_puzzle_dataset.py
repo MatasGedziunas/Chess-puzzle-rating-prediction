@@ -36,6 +36,13 @@ class ChessPuzzleDataset:
         self.blocks = blocks
         self.data_file_name = os.path.splitext(os.path.basename(csv_path))[0]
 
+    def _filter_mask(self, df):
+        if not self.filter_rating_deviation:
+            return np.ones(len(df), dtype=bool)
+        if "RatingDeviation" not in df.columns or "NbPlays" not in df.columns:
+            return np.ones(len(df), dtype=bool)
+        return ((df["RatingDeviation"] <= 90) & (df["NbPlays"] > 150)).to_numpy()
+
     def _cache_path(self):
         suffix = ""
         if self.max_rows:
@@ -109,10 +116,12 @@ class ChessPuzzleDataset:
                 print(f"Stale cache (no manifest) at {cache_path}, ignoring.")
             else:
                 manifest = json.loads(str(cached["manifest"]))
-                y = cached["y"]
                 df = pd.DataFrame(list(cached["df_records"]))
+                mask = self._filter_mask(df)
+                df = df.loc[mask].reset_index(drop=True)
+                y = cached["y"][mask]
                 for name in manifest:
-                    cached_blocks[name] = cached[f"block_{name}"]
+                    cached_blocks[name] = cached[f"block_{name}"][mask]
                 print(f"Cache hit: {list(manifest.keys())} blocks, {y.shape[0]} rows")
 
         missing = [name for name in requested if name not in manifest]
@@ -125,10 +134,10 @@ class ChessPuzzleDataset:
                     stockfish_path=self.stockfish_path,
                     num_rows=self.max_rows,
                 )
-                if self.filter_rating_deviation and "RatingDeviation" in df.columns:
-                    df = df[df["RatingDeviation"] <= 90].reset_index(drop=True)
-                    if stockfish_features is not None:
-                        stockfish_features = stockfish_features[df.index]
+                mask = self._filter_mask(df)
+                if stockfish_features is not None:
+                    stockfish_features = stockfish_features[mask]
+                df = df.loc[mask].reset_index(drop=True)
                 y = df["Rating"].values.astype(np.float32)
             else:
                 stockfish_features = None
