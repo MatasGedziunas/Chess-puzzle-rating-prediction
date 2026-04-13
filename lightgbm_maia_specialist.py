@@ -93,19 +93,13 @@ def load_maia2_elo_features(data_file_name, elo, model_types, data_dir="./data")
         top5p_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_top5_probs.npy")
         top5i_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_top5_indices.npy")
         pidx_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_policy_indices.npy")
-        ce_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_move_ce.npy")
-        bce_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_side_info_bce.npy")
-        val_path = os.path.join(data_dir, f"{data_file_name}_maia2_{model_type}_value.npy")
 
         top5_probs = np.load(top5p_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1, :]
         top5_indices = np.load(top5i_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1, :]
         policy_indices = np.load(pidx_path, mmap_mode="r")
-        move_ce = np.load(ce_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1] if os.path.exists(ce_path) else None
-        side_info_bce = np.load(bce_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1] if os.path.exists(bce_path) else None
-        value_output = np.load(val_path, mmap_mode="r")[:, :, elo_idx:elo_idx + 1] if os.path.exists(val_path) else None
 
         features = _derive_maia2_extended_features(
-            probs, top5_probs, top5_indices, policy_indices, move_ce, side_info_bce, value_output
+            probs, top5_probs, top5_indices, policy_indices
         )
         parts.append(features)
 
@@ -115,11 +109,8 @@ def load_maia2_elo_features(data_file_name, elo, model_types, data_dir="./data")
     return np.concatenate(parts, axis=1).astype(np.float32)
 
 
-def slice_feature_parts(feature_parts, indices):
-    return np.concatenate([part[indices] for part in feature_parts], axis=1).astype(np.float32)
-
-
 def train_lightgbm(X_train, y_train, X_val, y_val, sample_weights=None, device="cuda"):
+    evals_result = {}
     params = {
         "n_estimators": 5000,
         "learning_rate": 0.05,
@@ -138,12 +129,14 @@ def train_lightgbm(X_train, y_train, X_val, y_val, sample_weights=None, device="
         y_train,
         sample_weight=sample_weights,
         eval_set=[(X_train, y_train), (X_val, y_val)],
+        eval_names=["train", "val"],
         callbacks=[
+            lgb.record_evaluation(evals_result),
             lgb.early_stopping(stopping_rounds=100, verbose=True),
             lgb.log_evaluation(period=100),
         ],
     )
-    return model, params
+    return model, params, evals_result
 
 
 def evaluate_model(model, X_eval, y_eval):
@@ -158,9 +151,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--maia_sources",
         nargs="+",
-        required=True,
+        default=[],
         help="One or more maia sources whose features are concatenated. "
              "Examples: maia-1-1100  maia-2-1100  maia-2-rapid-1100",
+    )
+    parser.add_argument(
+        "--use_specialist_maia_features",
+        action="store_true",
+        default=False,
+        help="Load Maia specialist features from --maia_sources instead of using the standard dataset maia1/maia2 blocks.",
     )
     parser.add_argument("--csv_path", default="../filtered.csv")
     parser.add_argument("--stockfish_path", default="../filtered_sf_evals.csv")
@@ -186,9 +185,16 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    maia_version, model_types, maia_elo = parse_maia_source(args.maia_sources[0])
-    model_label = "__".join(s.replace("-", "_") for s in args.maia_sources)
+    if args.use_specialist_maia_features and not args.maia_sources:
+        parser.error("--use_specialist_maia_features requires --maia_sources")
+
+    specialist_label = "__".join(s.replace("-", "_") for s in args.maia_sources) if args.maia_sources else "standard"
+    blocks_label = "_".join(dataset_blocks) if 'dataset_blocks' in locals() else ""
+    model_label = specialist_label if args.use_specialist_maia_features else f"base__{blocks_label}"
     data_file_name = os.path.splitext(os.path.basename(args.csv_path))[0]
+    dataset_blocks = [block for block in args.blocks if block not in {"maia1", "maia2"}] if args.use_specialist_maia_features else args.blocks
+    blocks_label = "_".join(dataset_blocks)
+    model_label = specialist_label if args.use_specialist_maia_features else f"base__{blocks_label}"
 
     mlflow.set_tracking_uri("sqlite:///mlflow.db")
     mlflow.set_experiment("Chess_Puzzle_Maia_Specialists")
@@ -198,23 +204,25 @@ if __name__ == "__main__":
         data_dir=args.data_dir,
         stockfish_path=args.stockfish_path,
         themes_csv_path=args.themes_csv_path,
-        use_maia1=False,
-        use_maia2=False,
+        use_maia1=not args.use_specialist_maia_features and "maia1" in args.blocks,
+        use_maia2=not args.use_specialist_maia_features and "maia2" in args.blocks,
         use_maia2_mlp=False,
         filter_rating_deviation=args.filter_rating_deviation,
         max_rows=args.max_rows,
-        blocks=args.blocks,
+        blocks=dataset_blocks,
     )
 
-    X_base, y, df = dataset.load()
+    X, y, df = dataset.load()
 
-    maia_feature_parts = []
-    for source in args.maia_sources:
-        version, m_types, elo = parse_maia_source(source)
-        if version == 1:
-            maia_feature_parts.append(load_maia1_elo_features(data_file_name, elo, args.data_dir))
-        else:
-            maia_feature_parts.append(load_maia2_elo_features(data_file_name, elo, m_types, args.data_dir))
+    if args.use_specialist_maia_features:
+        specialist_features = []
+        for source in args.maia_sources:
+            version, model_types, elo = parse_maia_source(source)
+            if version == 1:
+                specialist_features.append(load_maia1_elo_features(data_file_name, elo, args.data_dir))
+            else:
+                specialist_features.append(load_maia2_elo_features(data_file_name, elo, model_types, args.data_dir))
+        X = np.concatenate([X] + specialist_features, axis=1).astype(np.float32)
 
     n = len(df)
     rating_deviation = df["RatingDeviation"].values.astype(np.float32) if "RatingDeviation" in df.columns else None
@@ -234,24 +242,21 @@ if __name__ == "__main__":
         train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=42)
 
     row_count = len(df)
-    feature_parts = [X_base]
-    feature_parts.extend(f[:row_count] for f in maia_feature_parts)
-    total_features = sum(part.shape[1] for part in feature_parts)
+    X = X[:row_count]
+    total_features = X.shape[1]
     print(f"Preparing split matrices with {total_features} features across {row_count} rows ")
 
-    X_train = slice_feature_parts(feature_parts, train_idx)
-    X_val = slice_feature_parts(feature_parts, val_idx)
-    X_test = slice_feature_parts(feature_parts, test_idx)
+    X_train = X[train_idx].astype(np.float32)
+    X_val = X[val_idx].astype(np.float32)
+    X_test = X[test_idx].astype(np.float32)
     y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
     train_weights = sample_weights[train_idx] if sample_weights is not None else None
 
-    del X_base
-    del maia_feature_parts
-    del feature_parts
+    del X
     gc.collect()
 
     print(
-        f"maia_sources={args.maia_sources}  features={total_features}  "
+        f"specialist_maia={args.use_specialist_maia_features}  maia_sources={args.maia_sources}  features={total_features}  "
         f"train={len(X_train)}  val={len(X_val)}  test={len(X_test)}"
     )
 
@@ -259,13 +264,19 @@ if __name__ == "__main__":
     with mlflow.start_run() as run:
         mlflow.log_params(vars(args))
         mlflow.log_param("model_label", model_label)
-        mlflow.log_param("blocks_str", " ".join(args.blocks))
+        mlflow.log_param("blocks_str", " ".join(dataset_blocks))
         mlflow.log_param("num_train", len(X_train))
         mlflow.log_param("num_val", len(X_val))
         mlflow.log_param("num_test", len(X_test))
+        mlflow.log_param("use_specialist_maia_features", args.use_specialist_maia_features)
+        if args.use_specialist_maia_features:
+            mlflow.log_param("specialist_maia_sources", " ".join(args.maia_sources))
 
+        model = None
+        model_params = {}
+        evals_result = {}
         try:
-            model, model_params = train_lightgbm(X_train, y_train, X_val, y_val, train_weights, args.device)
+            model, model_params, evals_result = train_lightgbm(X_train, y_train, X_val, y_val, train_weights, args.device)
         except KeyboardInterrupt:
             interrupted = True
             print("\nTraining interrupted. Saving partial results...")
@@ -274,6 +285,16 @@ if __name__ == "__main__":
             mlflow.log_param(k, v)
         if interrupted:
             mlflow.log_param("interrupted", True)
+
+        train_curve = evals_result.get("train", {}).get("l2", [])
+        val_curve = evals_result.get("val", {}).get("l2", [])
+        for step, mse in enumerate(train_curve):
+            mlflow.log_metric("train_mse_iter", mse, step=step)
+        for step, mse in enumerate(val_curve):
+            mlflow.log_metric("val_mse_iter", mse, step=step)
+
+        if model is None:
+            raise RuntimeError("Training did not produce a model.")
 
         train_mse, train_rmse = evaluate_model(model, X_train, y_train)
         val_mse, val_rmse = evaluate_model(model, X_val, y_val)
@@ -302,11 +323,12 @@ if __name__ == "__main__":
 
         results_dir = f"./results/{data_file_name}"
         os.makedirs(results_dir, exist_ok=True)
-        blocks_suffix = "_".join(args.blocks)
+        blocks_suffix = "_".join(dataset_blocks)
         pd.DataFrame([{
             "maia_sources": " ".join(args.maia_sources),
             "model_label": model_label,
-            "blocks": " ".join(args.blocks),
+            "blocks": " ".join(dataset_blocks),
+            "use_specialist_maia_features": args.use_specialist_maia_features,
             "interrupted": interrupted,
             "train_mse": train_mse,
             "train_rmse": train_rmse,

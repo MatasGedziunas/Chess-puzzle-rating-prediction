@@ -6,9 +6,8 @@ import torch
 from concurrent.futures import ThreadPoolExecutor
 from scipy.special import softmax
 from tqdm import tqdm
-from maia2 import model as maia2_model
-from maia2.inference import board_to_tensor as maia2_board_to_tensor
-from maia2.utils import create_elo_dict, get_all_possible_moves, map_to_category, mirror_move
+from maia2 import inference, model as maia2_model
+from maia2.utils import get_all_possible_moves
 
 from .lcz_encoder import board_to_planes, uci_to_policy_idx
 
@@ -194,7 +193,6 @@ def build_maia1_features(df, models_dir="./maia1", data_file_name=None, cache_di
 
 def _derive_flat_features(probs):
     eps = 1e-7
-    ce = -np.log(probs + eps)
 
     move_present = (probs > 0).astype(np.float32)
     safe_probs = np.where(move_present, probs, 1.0)
@@ -208,8 +206,6 @@ def _derive_flat_features(probs):
         probs.mean(axis=1),
         probs.min(axis=1),
         probs.max(axis=1),
-        ce.mean(axis=1),
-        ce.max(axis=1),
         joint_prob,
         log_joint_prob,
     ], axis=1).astype(np.float32)
@@ -221,12 +217,13 @@ def _load_maia2_model(model_type="rapid", device=None):
     model = maia2_model.from_pretrained(type=model_type, device=device)
     model = model.to(device)
     model.eval()
+    prepared = inference.prepare()
     all_moves_dict = {move: i for i, move in enumerate(get_all_possible_moves())}
-    return model, device, create_elo_dict(), all_moves_dict
+    return model, prepared, all_moves_dict
 
 
 def compute_maia2_move_probs(df, checkpoint_path=None, model_type="rapid", device=None):
-    model, device, elo_dict, all_moves_dict = _load_maia2_model(model_type, device=device)
+    model, prepared, all_moves_dict = _load_maia2_model(model_type, device=device)
 
     n = len(df)
     n_elos = len(MAIA2_ELOS)
@@ -239,33 +236,29 @@ def compute_maia2_move_probs(df, checkpoint_path=None, model_type="rapid", devic
     if start_idx:
         print(f"Resuming Maia-2 ({model_type}) from row {start_idx}")
 
-    elo_indices = [map_to_category(elo, elo_dict) for elo in MAIA2_ELOS]
-    elo_t_batch = torch.tensor(elo_indices, dtype=torch.long).to(device)
     fens = df["FEN"].tolist()
     moves_col = df["Moves"].tolist()
 
     for row_idx in tqdm(range(start_idx, n), desc=f"Maia-2 {model_type} probs"):
         row_entries = _collect_puzzle_entries(fens, moves_col, row_idx, row_idx + 1)
         for _, player_move_idx, board, uci in row_entries:
-            is_black = not board.turn
-            board_input = maia2_board_to_tensor(board.mirror() if is_black else board).unsqueeze(0).to(device)
-            board_batch = board_input.expand(n_elos, -1, -1, -1)
-            move_key = mirror_move(uci) if is_black else uci
-            move_key = move_key.rstrip("n")
+            move_key = uci.rstrip("n")
             policy_idx = all_moves_dict.get(move_key)
             if policy_idx is None:
                 continue
 
             policy_indices[row_idx, player_move_idx] = policy_idx
-            with torch.no_grad():
-                logits_policy, _, _ = model(board_batch, elos_self=elo_t_batch, elos_oppo=elo_t_batch)
-            all_probs = torch.softmax(logits_policy, dim=1).cpu().numpy()
+            fen = board.fen()
 
-            result[row_idx, player_move_idx] = all_probs[:, policy_idx]
-            for elo_idx, probabilities in enumerate(all_probs):
-                top_k_probs, top_k_indices = _top_k_probs_and_indices(probabilities)
-                top5_probs[row_idx, player_move_idx, elo_idx] = top_k_probs
-                top5_indices[row_idx, player_move_idx, elo_idx] = top_k_indices
+            for elo_idx, elo in enumerate(MAIA2_ELOS):
+                move_probs, _ = inference.inference_each(model, prepared, fen, elo, elo)
+                result[row_idx, player_move_idx, elo_idx] = move_probs.get(move_key, 0.0)
+
+                sorted_moves = list(move_probs.items())[:TOP_K]
+                top5_probs[row_idx, player_move_idx, elo_idx] = [prob for _, prob in sorted_moves]
+                top5_indices[row_idx, player_move_idx, elo_idx] = [
+                    all_moves_dict.get(predicted_move, -1) for predicted_move, _ in sorted_moves
+                ]
 
         if checkpoint_path and (row_idx + 1) % 10000 == 0:
             _save_checkpoint(checkpoint_path, row_idx + 1, result, policy_indices, top5_probs, top5_indices)
