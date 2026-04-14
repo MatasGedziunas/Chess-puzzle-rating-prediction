@@ -200,12 +200,15 @@ def _derive_flat_features(probs):
 
     log_probs = np.log(probs + eps) * move_present
     log_joint_prob = log_probs.sum(axis=1)
+    ce = -log_probs
 
     return np.concatenate([
         probs.reshape(len(probs), -1),
         probs.mean(axis=1),
         probs.min(axis=1),
         probs.max(axis=1),
+        ce.mean(axis=1),
+        ce.max(axis=1),
         joint_prob,
         log_joint_prob,
     ], axis=1).astype(np.float32)
