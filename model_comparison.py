@@ -91,12 +91,12 @@ def build_random_forest():
 
 
 def build_catboost():
-    if CatBoostRegressor is None:
-        raise ImportError("catboost is not installed. Install it or remove catboost from --models.")
     params = {
         "iterations": BOOSTING_ROUNDS,
         "learning_rate": 0.05,
         "depth": 6,
+        "min_data_in_leaf": 20,
+        "border_count": 255,
         "loss_function": "RMSE",
         "eval_metric": "RMSE",
         "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
