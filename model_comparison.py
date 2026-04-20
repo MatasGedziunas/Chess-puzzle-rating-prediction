@@ -49,6 +49,10 @@ def evaluate_model(model, X_eval, y_eval):
     return mse, rmse
 
 
+def configure_cuda_device(cuda_device):
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_device)
+
+
 def load_split_indices(splits_path, row_count):
     if splits_path and os.path.exists(splits_path):
         splits = np.load(splits_path)
@@ -94,7 +98,7 @@ def build_random_forest():
     return model, params
 
 
-def build_catboost():
+def build_catboost(cuda_device):
     if CatBoostRegressor is None:
         raise ImportError("catboost is not installed. Install it or remove catboost from --models.")
     params = {
@@ -107,6 +111,7 @@ def build_catboost():
         "random_seed": RANDOM_STATE,
         "verbose": LOG_PERIOD,
         "task_type": "GPU",
+        "devices": str(cuda_device),
     }
     model = CatBoostRegressor(**params)
     return model, params
@@ -136,11 +141,11 @@ def build_mlp():
     return model, params
 
 
-def get_model_builder(model_name):
+def get_model_builder(model_name, cuda_device):
     builders = {
-        "lightgbm": build_lightgbm,
+        "lightgbm": lambda: build_lightgbm(),
         "random_forest": build_random_forest,
-        "catboost": build_catboost,
+        "catboost": lambda: build_catboost(cuda_device),
         "mlp": build_mlp,
     }
     return builders[model_name]
@@ -220,6 +225,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_rows", type=int, default=None)
     parser.add_argument("--filter_rating_deviation", action="store_true", default=True)
     parser.add_argument("--splits_path", default=None)
+    parser.add_argument("--cuda_device", type=int, default=0)
     parser.add_argument(
         "--models",
         nargs="+",
@@ -231,6 +237,7 @@ if __name__ == "__main__":
     if "catboost" in args.models and CatBoostRegressor is None:
         raise ImportError("catboost is not installed. Install it or run without catboost in --models.")
 
+    configure_cuda_device(args.cuda_device)
     data_file_name = os.path.splitext(os.path.basename(args.csv_path))[0]
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_DIR)
@@ -265,7 +272,7 @@ if __name__ == "__main__":
 
     print(
         f"features={X.shape[1]} train={len(X_train)} val={len(X_val)} test={len(X_test)} "
-        f"models={' '.join(args.models)}"
+        f"models={' '.join(args.models)} cuda_device={args.cuda_device}"
     )
 
     results = []
@@ -273,7 +280,7 @@ if __name__ == "__main__":
     os.makedirs(results_dir, exist_ok=True)
 
     for model_name in args.models:
-        builder = get_model_builder(model_name)
+        builder = get_model_builder(model_name, args.cuda_device)
         model, model_params = builder()
 
         print(f"\nTraining {model_name}...")
