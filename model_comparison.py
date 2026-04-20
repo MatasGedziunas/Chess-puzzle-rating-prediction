@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+import time
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -33,6 +34,12 @@ MLFLOW_TRACKING_DIR = Path(os.path.join(CURRENT_DIR, "mlruns_model_comparison"))
 EXPERIMENT_NAME = "Chess_Puzzle_Model_Comparison"
 DEFAULT_MODELS = ["lightgbm", "random_forest", "catboost", "mlp"]
 DEFAULT_BLOCKS = ["struct", "themes", "advanced", "stockfish", "maia1", "maia2"]
+RANDOM_STATE = 42
+BOOSTING_ROUNDS = 5000
+EARLY_STOPPING_ROUNDS = 100
+RANDOM_FOREST_TREES = 500
+MLP_MAX_ITER = 5000
+LOG_PERIOD = 100
 
 
 def evaluate_model(model, X_eval, y_eval):
@@ -52,20 +59,20 @@ def load_split_indices(splits_path, row_count):
         return train_idx, val_idx, test_idx
 
     indices = np.arange(row_count)
-    train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=42)
-    train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=42)
+    train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=RANDOM_STATE)
+    train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=RANDOM_STATE)
     return train_idx, val_idx, test_idx
 
 
 def build_lightgbm():
     params = {
-        "n_estimators": 5000,
+        "n_estimators": BOOSTING_ROUNDS,
         "learning_rate": 0.05,
         "num_leaves": 63,
         "min_child_samples": 20,
         "objective": "regression",
         "metric": ["mse", "rmse"],
-        "random_state": 42,
+        "random_state": RANDOM_STATE,
         "verbosity": -1,
         "device": "cuda",
         "max_bin": 255,
@@ -76,12 +83,12 @@ def build_lightgbm():
 
 def build_random_forest():
     params = {
-        "n_estimators": 500,
+        "n_estimators": RANDOM_FOREST_TREES,
         "max_depth": None,
         "min_samples_split": 2,
         "min_samples_leaf": 1,
         "n_jobs": -1,
-        "random_state": 42,
+        "random_state": RANDOM_STATE,
     }
     model = RandomForestRegressor(**params)
     return model, params
@@ -91,14 +98,14 @@ def build_catboost():
     if CatBoostRegressor is None:
         raise ImportError("catboost is not installed. Install it or remove catboost from --models.")
     params = {
-        "iterations": 5000,
+        "iterations": BOOSTING_ROUNDS,
         "learning_rate": 0.05,
         "depth": 6,
         "loss_function": "RMSE",
         "eval_metric": "RMSE",
-        "early_stopping_rounds": 100,
-        "random_seed": 42,
-        "verbose": 200,
+        "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
+        "random_seed": RANDOM_STATE,
+        "verbose": LOG_PERIOD,
         "task_type": "GPU",
     }
     model = CatBoostRegressor(**params)
@@ -113,11 +120,11 @@ def build_mlp():
         "alpha": 1e-4,
         "batch_size": 256,
         "learning_rate_init": 1e-3,
-        "max_iter": 200,
+        "max_iter": MLP_MAX_ITER,
         "early_stopping": True,
         "validation_fraction": 0.1,
-        "n_iter_no_change": 20,
-        "random_state": 42,
+        "n_iter_no_change": EARLY_STOPPING_ROUNDS,
+        "random_state": RANDOM_STATE,
         "verbose": True,
     }
     model = Pipeline(
@@ -139,16 +146,15 @@ def get_model_builder(model_name):
     return builders[model_name]
 
 
-def fit_model(model_name, model, X_train, y_train, X_val, y_val, sample_weights):
+def fit_model(model_name, model, X_train, y_train, X_val, y_val):
     if model_name == "lightgbm":
         callbacks = [
-            lgb.early_stopping(stopping_rounds=100, verbose=True),
-            lgb.log_evaluation(period=100),
+            lgb.early_stopping(stopping_rounds=EARLY_STOPPING_ROUNDS, verbose=True),
+            lgb.log_evaluation(period=LOG_PERIOD),
         ]
         model.fit(
             X_train,
             y_train,
-            sample_weight=sample_weights,
             eval_set=[(X_train, y_train), (X_val, y_val)],
             eval_names=["train", "val"],
             callbacks=callbacks,
@@ -162,8 +168,6 @@ def fit_model(model_name, model, X_train, y_train, X_val, y_val, sample_weights)
             "eval_set": (X_val, y_val),
             "use_best_model": True,
         }
-        if sample_weights is not None:
-            fit_kwargs["sample_weight"] = sample_weights
         model.fit(**fit_kwargs)
         return
 
@@ -172,8 +176,6 @@ def fit_model(model_name, model, X_train, y_train, X_val, y_val, sample_weights)
             "X": X_train,
             "y": y_train,
         }
-        if sample_weights is not None:
-            fit_kwargs["sample_weight"] = sample_weights
         model.fit(**fit_kwargs)
         return
 
@@ -217,7 +219,6 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", default=DEFAULT_DATA_DIR)
     parser.add_argument("--max_rows", type=int, default=None)
     parser.add_argument("--filter_rating_deviation", action="store_true", default=True)
-    parser.add_argument("--use_sample_weights", action="store_true", default=False)
     parser.add_argument("--splits_path", default=None)
     parser.add_argument(
         "--models",
@@ -255,18 +256,12 @@ if __name__ == "__main__":
 
     train_idx, val_idx, test_idx = load_split_indices(args.splits_path, row_count)
 
-    rating_deviation = df["RatingDeviation"].values.astype(np.float32) if "RatingDeviation" in df.columns else None
-    sample_weights = None
-    if args.use_sample_weights and rating_deviation is not None:
-        sample_weights = (1.0 / np.maximum(rating_deviation, 1.0)).astype(np.float32)
-
     X_train = X[train_idx]
     X_val = X[val_idx]
     X_test = X[test_idx]
     y_train = y[train_idx]
     y_val = y[val_idx]
     y_test = y[test_idx]
-    train_weights = sample_weights[train_idx] if sample_weights is not None else None
 
     print(
         f"features={X.shape[1]} train={len(X_train)} val={len(X_val)} test={len(X_test)} "
@@ -293,12 +288,15 @@ if __name__ == "__main__":
             mlflow.log_param("num_test", len(X_test))
             mlflow.log_params({f"model_{key}": value for key, value in model_params.items()})
 
-            fit_model(model_name, model, X_train, y_train, X_val, y_val, train_weights)
+            train_start_time = time.perf_counter()
+            fit_model(model_name, model, X_train, y_train, X_val, y_val)
+            training_time_seconds = time.perf_counter() - train_start_time
 
             train_mse, train_rmse = evaluate_model(model, X_train, y_train)
             val_mse, val_rmse = evaluate_model(model, X_val, y_val)
             test_mse, test_rmse = evaluate_model(model, X_test, y_test)
 
+            mlflow.log_metric("training_time_seconds", training_time_seconds)
             mlflow.log_metric("train_mse", train_mse)
             mlflow.log_metric("train_rmse", train_rmse)
             mlflow.log_metric("val_mse", val_mse)
@@ -309,6 +307,7 @@ if __name__ == "__main__":
             log_model_to_mlflow(model_name, model)
             model_path = save_model(model_name, model, MODEL_DIR)
 
+            print(f"  Training time: {training_time_seconds:.2f}s")
             print(f"  Train MSE: {train_mse:.2f} (RMSE: {train_rmse:.2f})")
             print(f"  Val   MSE: {val_mse:.2f} (RMSE: {val_rmse:.2f})")
             print(f"  Test  MSE: {test_mse:.2f} (RMSE: {test_rmse:.2f})")
@@ -318,6 +317,7 @@ if __name__ == "__main__":
             results.append(
                 {
                     "model_name": model_name,
+                    "training_time_seconds": training_time_seconds,
                     "train_mse": train_mse,
                     "train_rmse": train_rmse,
                     "val_mse": val_mse,
@@ -334,5 +334,5 @@ if __name__ == "__main__":
     results_df.to_csv(results_path, index=False)
 
     print("\nComparison complete.")
-    print(results_df[["model_name", "val_rmse", "test_rmse"]].to_string(index=False))
+    print(results_df[["model_name", "training_time_seconds", "val_rmse", "test_rmse"]].to_string(index=False))
     print(f"Saved results -> {results_path}")
