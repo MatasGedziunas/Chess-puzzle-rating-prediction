@@ -10,7 +10,7 @@ import mlflow
 import joblib
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold
 from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -40,6 +40,7 @@ EARLY_STOPPING_ROUNDS = 100
 RANDOM_FOREST_TREES = 500
 MLP_MAX_ITER = 5000
 LOG_PERIOD = 100
+CV_FOLDS = 5
 
 
 def evaluate_model(model, X_eval, y_eval):
@@ -53,19 +54,10 @@ def configure_cuda_device(cuda_device):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_device)
 
 
-def load_split_indices(splits_path, row_count):
-    if splits_path and os.path.exists(splits_path):
-        splits = np.load(splits_path)
-        train_idx = splits["train_idx"]
-        val_idx = splits["val_idx"]
-        test_idx = splits["test_idx"]
-        print(f"Loaded splits from {splits_path}")
-        return train_idx, val_idx, test_idx
-
+def build_cv_splits(row_count):
     indices = np.arange(row_count)
-    train_idx, test_idx = train_test_split(indices, test_size=0.1, random_state=RANDOM_STATE)
-    train_idx, val_idx = train_test_split(train_idx, test_size=1.0 / 9.0, random_state=RANDOM_STATE)
-    return train_idx, val_idx, test_idx
+    kfold = KFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    return list(kfold.split(indices))
 
 
 def build_lightgbm():
@@ -98,7 +90,7 @@ def build_random_forest():
     return model, params
 
 
-def build_catboost(cuda_device):
+def build_catboost():
     if CatBoostRegressor is None:
         raise ImportError("catboost is not installed. Install it or remove catboost from --models.")
     params = {
@@ -111,7 +103,6 @@ def build_catboost(cuda_device):
         "random_seed": RANDOM_STATE,
         "verbose": LOG_PERIOD,
         "task_type": "GPU",
-        "devices": str(cuda_device),
     }
     model = CatBoostRegressor(**params)
     return model, params
@@ -141,11 +132,11 @@ def build_mlp():
     return model, params
 
 
-def get_model_builder(model_name, cuda_device):
+def get_model_builder(model_name):
     builders = {
         "lightgbm": lambda: build_lightgbm(),
         "random_forest": build_random_forest,
-        "catboost": lambda: build_catboost(cuda_device),
+        "catboost": build_catboost,
         "mlp": build_mlp,
     }
     return builders[model_name]
@@ -224,7 +215,6 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", default=DEFAULT_DATA_DIR)
     parser.add_argument("--max_rows", type=int, default=None)
     parser.add_argument("--filter_rating_deviation", action="store_true", default=True)
-    parser.add_argument("--splits_path", default=None)
     parser.add_argument("--cuda_device", type=int, default=0)
     parser.add_argument(
         "--models",
@@ -260,18 +250,10 @@ if __name__ == "__main__":
     row_count = len(df)
     X = X[:row_count].astype(np.float32)
     y = y[:row_count]
-
-    train_idx, val_idx, test_idx = load_split_indices(args.splits_path, row_count)
-
-    X_train = X[train_idx]
-    X_val = X[val_idx]
-    X_test = X[test_idx]
-    y_train = y[train_idx]
-    y_val = y[val_idx]
-    y_test = y[test_idx]
+    cv_splits = build_cv_splits(row_count)
 
     print(
-        f"features={X.shape[1]} train={len(X_train)} val={len(X_val)} test={len(X_test)} "
+        f"features={X.shape[1]} rows={row_count} folds={CV_FOLDS} "
         f"models={' '.join(args.models)} cuda_device={args.cuda_device}"
     )
 
@@ -280,9 +262,6 @@ if __name__ == "__main__":
     os.makedirs(results_dir, exist_ok=True)
 
     for model_name in args.models:
-        builder = get_model_builder(model_name, args.cuda_device)
-        model, model_params = builder()
-
         print(f"\nTraining {model_name}...")
 
         with mlflow.start_run(run_name=model_name, nested=False) as run:
@@ -290,56 +269,149 @@ if __name__ == "__main__":
             mlflow.log_param("model_name", model_name)
             mlflow.log_param("blocks_str", " ".join(DEFAULT_BLOCKS))
             mlflow.log_param("num_features", X.shape[1])
-            mlflow.log_param("num_train", len(X_train))
-            mlflow.log_param("num_val", len(X_val))
-            mlflow.log_param("num_test", len(X_test))
-            mlflow.log_params({f"model_{key}": value for key, value in model_params.items()})
+            mlflow.log_param("num_rows", row_count)
+            mlflow.log_param("cv_folds", CV_FOLDS)
 
-            train_start_time = time.perf_counter()
-            fit_model(model_name, model, X_train, y_train, X_val, y_val)
-            training_time_seconds = time.perf_counter() - train_start_time
+            fold_results = []
+            model_params = None
+            last_model = None
 
-            train_mse, train_rmse = evaluate_model(model, X_train, y_train)
-            val_mse, val_rmse = evaluate_model(model, X_val, y_val)
-            test_mse, test_rmse = evaluate_model(model, X_test, y_test)
+            for fold_idx, (train_idx, val_idx) in enumerate(cv_splits, start=1):
+                X_train = X[train_idx]
+                X_val = X[val_idx]
+                y_train = y[train_idx]
+                y_val = y[val_idx]
 
-            mlflow.log_metric("training_time_seconds", training_time_seconds)
-            mlflow.log_metric("train_mse", train_mse)
-            mlflow.log_metric("train_rmse", train_rmse)
-            mlflow.log_metric("val_mse", val_mse)
-            mlflow.log_metric("val_rmse", val_rmse)
-            mlflow.log_metric("test_mse", test_mse)
-            mlflow.log_metric("test_rmse", test_rmse)
+                builder = get_model_builder(model_name)
+                model, current_model_params = builder()
+                if model_params is None:
+                    model_params = current_model_params
+                    mlflow.log_params({f"model_{key}": value for key, value in model_params.items()})
 
-            log_model_to_mlflow(model_name, model)
-            model_path = save_model(model_name, model, MODEL_DIR)
+                print(
+                    f"  Fold {fold_idx}/{CV_FOLDS}: "
+                    f"train={len(X_train)} val={len(X_val)}"
+                )
 
-            print(f"  Training time: {training_time_seconds:.2f}s")
-            print(f"  Train MSE: {train_mse:.2f} (RMSE: {train_rmse:.2f})")
-            print(f"  Val   MSE: {val_mse:.2f} (RMSE: {val_rmse:.2f})")
-            print(f"  Test  MSE: {test_mse:.2f} (RMSE: {test_rmse:.2f})")
-            print(f"  Saved model -> {model_path}")
+                train_start_time = time.perf_counter()
+                fit_model(model_name, model, X_train, y_train, X_val, y_val)
+                training_time_seconds = time.perf_counter() - train_start_time
+
+                train_mse, train_rmse = evaluate_model(model, X_train, y_train)
+                val_mse, val_rmse = evaluate_model(model, X_val, y_val)
+
+                mlflow.log_metric(f"fold_{fold_idx}_training_time_seconds", training_time_seconds)
+                mlflow.log_metric(f"fold_{fold_idx}_train_mse", train_mse)
+                mlflow.log_metric(f"fold_{fold_idx}_train_rmse", train_rmse)
+                mlflow.log_metric(f"fold_{fold_idx}_val_mse", val_mse)
+                mlflow.log_metric(f"fold_{fold_idx}_val_rmse", val_rmse)
+
+                model_path = save_model(f"{model_name}_fold{fold_idx}", model, MODEL_DIR)
+                last_model = model
+
+                print(f"    Training time: {training_time_seconds:.2f}s")
+                print(f"    Train MSE: {train_mse:.2f} (RMSE: {train_rmse:.2f})")
+                print(f"    Val   MSE: {val_mse:.2f} (RMSE: {val_rmse:.2f})")
+                print(f"    Saved model -> {model_path}")
+
+                fold_results.append(
+                    {
+                        "model_name": model_name,
+                        "fold": fold_idx,
+                        "training_time_seconds": training_time_seconds,
+                        "train_mse": train_mse,
+                        "train_rmse": train_rmse,
+                        "val_mse": val_mse,
+                        "val_rmse": val_rmse,
+                        "model_path": model_path,
+                        "mlflow_run_id": run.info.run_id,
+                    }
+                )
+
+            if last_model is not None:
+                log_model_to_mlflow(model_name, last_model)
+
+            fold_df = pd.DataFrame(fold_results)
+            best_fold_idx = fold_df["val_rmse"].idxmin()
+            worst_fold_idx = fold_df["val_rmse"].idxmax()
+            best_fold = fold_df.loc[best_fold_idx]
+            worst_fold = fold_df.loc[worst_fold_idx]
+            summary = {
+                "model_name": model_name,
+                "training_time_seconds_mean": fold_df["training_time_seconds"].mean(),
+                "training_time_seconds_std": fold_df["training_time_seconds"].std(ddof=0),
+                "train_mse_mean": fold_df["train_mse"].mean(),
+                "train_mse_std": fold_df["train_mse"].std(ddof=0),
+                "train_rmse_mean": fold_df["train_rmse"].mean(),
+                "train_rmse_std": fold_df["train_rmse"].std(ddof=0),
+                "val_mse_mean": fold_df["val_mse"].mean(),
+                "val_mse_std": fold_df["val_mse"].std(ddof=0),
+                "val_rmse_mean": fold_df["val_rmse"].mean(),
+                "val_rmse_std": fold_df["val_rmse"].std(ddof=0),
+                "best_fold": int(best_fold["fold"]),
+                "best_fold_training_time_seconds": best_fold["training_time_seconds"],
+                "best_fold_train_mse": best_fold["train_mse"],
+                "best_fold_train_rmse": best_fold["train_rmse"],
+                "best_fold_val_mse": best_fold["val_mse"],
+                "best_fold_val_rmse": best_fold["val_rmse"],
+                "worst_fold": int(worst_fold["fold"]),
+                "worst_fold_training_time_seconds": worst_fold["training_time_seconds"],
+                "worst_fold_train_mse": worst_fold["train_mse"],
+                "worst_fold_train_rmse": worst_fold["train_rmse"],
+                "worst_fold_val_mse": worst_fold["val_mse"],
+                "worst_fold_val_rmse": worst_fold["val_rmse"],
+                "mlflow_run_id": run.info.run_id,
+            }
+
+            mlflow.log_metric("training_time_seconds_mean", summary["training_time_seconds_mean"])
+            mlflow.log_metric("training_time_seconds_std", summary["training_time_seconds_std"])
+            mlflow.log_metric("train_mse_mean", summary["train_mse_mean"])
+            mlflow.log_metric("train_mse_std", summary["train_mse_std"])
+            mlflow.log_metric("train_rmse_mean", summary["train_rmse_mean"])
+            mlflow.log_metric("train_rmse_std", summary["train_rmse_std"])
+            mlflow.log_metric("val_mse_mean", summary["val_mse_mean"])
+            mlflow.log_metric("val_mse_std", summary["val_mse_std"])
+            mlflow.log_metric("val_rmse_mean", summary["val_rmse_mean"])
+            mlflow.log_metric("val_rmse_std", summary["val_rmse_std"])
+            mlflow.log_metric("best_fold", summary["best_fold"])
+            mlflow.log_metric("best_fold_training_time_seconds", summary["best_fold_training_time_seconds"])
+            mlflow.log_metric("best_fold_train_mse", summary["best_fold_train_mse"])
+            mlflow.log_metric("best_fold_train_rmse", summary["best_fold_train_rmse"])
+            mlflow.log_metric("best_fold_val_mse", summary["best_fold_val_mse"])
+            mlflow.log_metric("best_fold_val_rmse", summary["best_fold_val_rmse"])
+            mlflow.log_metric("worst_fold", summary["worst_fold"])
+            mlflow.log_metric("worst_fold_training_time_seconds", summary["worst_fold_training_time_seconds"])
+            mlflow.log_metric("worst_fold_train_mse", summary["worst_fold_train_mse"])
+            mlflow.log_metric("worst_fold_train_rmse", summary["worst_fold_train_rmse"])
+            mlflow.log_metric("worst_fold_val_mse", summary["worst_fold_val_mse"])
+            mlflow.log_metric("worst_fold_val_rmse", summary["worst_fold_val_rmse"])
+
+            print(f"  Mean training time: {summary['training_time_seconds_mean']:.2f}s +/- {summary['training_time_seconds_std']:.2f}s")
+            print(f"  Mean train RMSE: {summary['train_rmse_mean']:.2f} +/- {summary['train_rmse_std']:.2f}")
+            print(f"  Mean val   RMSE: {summary['val_rmse_mean']:.2f} +/- {summary['val_rmse_std']:.2f}")
+            print(
+                f"  Best fold: {summary['best_fold']} "
+                f"(val RMSE: {summary['best_fold_val_rmse']:.2f}, train RMSE: {summary['best_fold_train_rmse']:.2f})"
+            )
+            print(
+                f"  Worst fold: {summary['worst_fold']} "
+                f"(val RMSE: {summary['worst_fold_val_rmse']:.2f}, train RMSE: {summary['worst_fold_train_rmse']:.2f})"
+            )
             print(f"  MLflow run  -> {run.info.run_id}")
 
-            results.append(
-                {
-                    "model_name": model_name,
-                    "training_time_seconds": training_time_seconds,
-                    "train_mse": train_mse,
-                    "train_rmse": train_rmse,
-                    "val_mse": val_mse,
-                    "val_rmse": val_rmse,
-                    "test_mse": test_mse,
-                    "test_rmse": test_rmse,
-                    "model_path": model_path,
-                    "mlflow_run_id": run.info.run_id,
-                }
-            )
+            results.extend(fold_results)
+            results.append(summary)
 
-    results_df = pd.DataFrame(results).sort_values("val_rmse").reset_index(drop=True)
-    results_path = os.path.join(results_dir, "model_comparison_results.csv")
-    results_df.to_csv(results_path, index=False)
+    results_df = pd.DataFrame(results)
+    fold_results_df = results_df[results_df.get("fold").notna()].copy()
+    summary_df = results_df[results_df.get("fold").isna()].copy()
+    results_path = os.path.join(results_dir, f"model_comparison_results_{args.max_rows}.csv")
+    fold_results_path = os.path.join(results_dir, f"model_comparison_fold_results_{args.max_rows}.csv")
+    summary_df = summary_df.sort_values("val_rmse_mean").reset_index(drop=True)
+    fold_results_df.to_csv(fold_results_path, index=False)
+    summary_df.to_csv(results_path, index=False)
 
     print("\nComparison complete.")
-    print(results_df[["model_name", "training_time_seconds", "val_rmse", "test_rmse"]].to_string(index=False))
-    print(f"Saved results -> {results_path}")
+    print(summary_df[["model_name", "training_time_seconds_mean", "val_rmse_mean", "val_rmse_std"]].to_string(index=False))
+    print(f"Saved summary -> {results_path}")
+    print(f"Saved fold results -> {fold_results_path}")
