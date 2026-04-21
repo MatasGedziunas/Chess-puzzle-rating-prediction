@@ -48,7 +48,7 @@ CV_FOLDS = 5
 MLP_BATCH_SIZE = 128
 MLP_DROPOUT = 0.15
 MLP_PATIENCE = 8
-MLP_VALIDATION_CHECK_INTERVAL = 1
+MLP_VALIDATION_CHECK_INTERVAL = 2000
 
 
 class MLPNetwork(nn.Module):
@@ -80,7 +80,7 @@ class MLPRegressor:
         self.max_iter = max_iter
         self.random_state = random_state
         self.scaler = StandardScaler()
-        self.device = torch.device("cuda")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
 
     def _ensure_model(self, input_dim):
@@ -120,6 +120,7 @@ class MLPRegressor:
         best_val_mse = float("inf")
         best_state = None
         checks_without_improvement = 0
+        optimizer_step_count = 0
 
         for epoch in range(1, self.max_iter + 1):
             self.model.train()
@@ -133,23 +134,37 @@ class MLPRegressor:
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
+                optimizer_step_count += 1
 
-            if epoch % MLP_VALIDATION_CHECK_INTERVAL != 0:
-                continue
+                if optimizer_step_count % MLP_VALIDATION_CHECK_INTERVAL != 0:
+                    continue
 
+                self.model.eval()
+                with torch.no_grad():
+                    val_predictions = self.model(X_val_tensor)
+                    val_mse = criterion(val_predictions, y_val_tensor).item()
+
+                if val_mse < best_val_mse:
+                    best_val_mse = val_mse
+                    best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+                    checks_without_improvement = 0
+                else:
+                    checks_without_improvement += 1
+                    if checks_without_improvement >= MLP_PATIENCE:
+                        break
+
+                self.model.train()
+
+            if checks_without_improvement >= MLP_PATIENCE:
+                break
+
+        if best_state is None:
             self.model.eval()
             with torch.no_grad():
                 val_predictions = self.model(X_val_tensor)
                 val_mse = criterion(val_predictions, y_val_tensor).item()
-
-            if val_mse < best_val_mse:
-                best_val_mse = val_mse
-                best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
-                checks_without_improvement = 0
-            else:
-                checks_without_improvement += 1
-                if checks_without_improvement >= MLP_PATIENCE:
-                    break
+            best_val_mse = val_mse
+            best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
 
         if best_state is not None:
             self.model.load_state_dict(best_state)

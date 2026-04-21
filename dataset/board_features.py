@@ -27,55 +27,65 @@ def _piece_mobility(board, piece_type, color):
 
 
 def _attackers_near_king(board, king_color, attacking_color):
-    king_sq = board.king(king_color)
-    if king_sq is None:
+    king_square = board.king(king_color)
+    if king_square is None:
         return 0
-    kf, kr = chess.square_file(king_sq), chess.square_rank(king_sq)
+    king_file = chess.square_file(king_square)
+    king_rank = chess.square_rank(king_square)
     count = 0
-    for df in (-1, 0, 1):
-        for dr in (-1, 0, 1):
-            f, r = kf + df, kr + dr
-            if 0 <= f <= 7 and 0 <= r <= 7:
-                count += len(board.attackers(attacking_color, chess.square(f, r)))
+    for file_offset in (-1, 0, 1):
+        for rank_offset in (-1, 0, 1):
+            target_file = king_file + file_offset
+            target_rank = king_rank + rank_offset
+            if 0 <= target_file <= 7 and 0 <= target_rank <= 7:
+                count += len(board.attackers(attacking_color, chess.square(target_file, target_rank)))
     return count
 
 
 def _pawn_islands(board, color):
-    files = sorted({chess.square_file(sq) for sq in board.pieces(chess.PAWN, color)})
-    if not files:
+    pawn_files = sorted({chess.square_file(square) for square in board.pieces(chess.PAWN, color)})
+    if not pawn_files:
         return 0
-    return 1 + sum(1 for i in range(1, len(files)) if files[i] - files[i - 1] > 1)
+    island_count = 1
+    for index in range(1, len(pawn_files)):
+        if pawn_files[index] - pawn_files[index - 1] > 1:
+            island_count += 1
+    return island_count
 
 
 def _doubled_pawns(board, color):
-    fcounts = [0] * 8
-    for sq in board.pieces(chess.PAWN, color):
-        fcounts[chess.square_file(sq)] += 1
-    return sum(c - 1 for c in fcounts if c > 1)
+    pawn_counts_by_file = [0] * 8
+    for square in board.pieces(chess.PAWN, color):
+        pawn_counts_by_file[chess.square_file(square)] += 1
+    return sum(file_count - 1 for file_count in pawn_counts_by_file if file_count > 1)
 
 
 def _isolated_pawns(board, color):
-    pf = {chess.square_file(sq) for sq in board.pieces(chess.PAWN, color)}
-    return sum(1 for sq in board.pieces(chess.PAWN, color)
-               if (f := chess.square_file(sq)) and (f - 1) not in pf and (f + 1) not in pf)
+    pawn_files = {chess.square_file(square) for square in board.pieces(chess.PAWN, color)}
+    return sum(
+        1
+        for square in board.pieces(chess.PAWN, color)
+        if (pawn_file := chess.square_file(square)) and (pawn_file - 1) not in pawn_files and (pawn_file + 1) not in pawn_files
+    )
 
 
 def _passed_pawns(board, color):
-    opp = not color
+    opponent_color = not color
     direction = 1 if color == chess.WHITE else -1
     count = 0
-    for sq in board.pieces(chess.PAWN, color):
-        f, r = chess.square_file(sq), chess.square_rank(sq)
+    for square in board.pieces(chess.PAWN, color):
+        pawn_file = chess.square_file(square)
+        pawn_rank = chess.square_rank(square)
         is_passed = True
-        for cf in (f - 1, f, f + 1):
-            if 0 <= cf <= 7:
-                cr = r + direction
-                while 0 <= cr <= 7:
-                    p = board.piece_at(chess.square(cf, cr))
-                    if p and p.piece_type == chess.PAWN and p.color == opp:
+        for candidate_file in (pawn_file - 1, pawn_file, pawn_file + 1):
+            if 0 <= candidate_file <= 7:
+                candidate_rank = pawn_rank + direction
+                while 0 <= candidate_rank <= 7:
+                    piece = board.piece_at(chess.square(candidate_file, candidate_rank))
+                    if piece and piece.piece_type == chess.PAWN and piece.color == opponent_color:
                         is_passed = False
                         break
-                    cr += direction
+                    candidate_rank += direction
                 if not is_passed:
                     break
         if is_passed:
@@ -85,24 +95,24 @@ def _passed_pawns(board, color):
 
 def _undefended_pieces(board, color):
     cnt, val = 0, 0
-    for pt in [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]:
-        for sq in board.pieces(pt, color):
-            if not board.attackers(color, sq):
+    for piece_type in [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]:
+        for square in board.pieces(piece_type, color):
+            if not board.attackers(color, square):
                 cnt += 1
-                val += PIECE_VALUES[pt]
+                val += PIECE_VALUES[piece_type]
     return cnt, val
 
 
 def _over_under_defended(board, color):
-    opp = not color
+    opponent_color = not color
     over, under = 0, 0
-    for pt in [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]:
-        for sq in board.pieces(pt, color):
-            d = len(board.attackers(color, sq))
-            a = len(board.attackers(opp, sq))
-            if d > a and a > 0:
+    for piece_type in [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]:
+        for square in board.pieces(piece_type, color):
+            defender_count = len(board.attackers(color, square))
+            attacker_count = len(board.attackers(opponent_color, square))
+            if defender_count > attacker_count and attacker_count > 0:
                 over += 1
-            elif a > d:
+            elif attacker_count > defender_count:
                 under += 1
     return over, under
 
@@ -143,23 +153,23 @@ def _extract_position_features(board, move, side):
     f['materially_safe_captures'] = safe_caps
 
     if move is not None:
-        mp = board.piece_at(move.from_square)
+        moving_piece = board.piece_at(move.from_square)
         board.push(move)
         f['move_is_check'] = int(board.is_check())
         board.pop()
         f['moving_piece_mobility'] = sum(1 for lm in legal if lm.from_square == move.from_square)
-        cap = board.piece_at(move.to_square)
-        is_ep = board.is_capture(move) and cap is None
-        if cap:
-            f['captures_undefended'] = int(not board.attackers(cap.color, move.to_square))
-            f['material_gain'] = PIECE_VALUES.get(cap.piece_type, 0)
-        elif is_ep:
+        captured_piece = board.piece_at(move.to_square)
+        is_en_passant = board.is_capture(move) and captured_piece is None
+        if captured_piece:
+            f['captures_undefended'] = int(not board.attackers(captured_piece.color, move.to_square))
+            f['material_gain'] = PIECE_VALUES.get(captured_piece.piece_type, 0)
+        elif is_en_passant:
             f['captures_undefended'] = 0
             f['material_gain'] = PIECE_VALUES[chess.PAWN]
         else:
             f['captures_undefended'] = 0
             f['material_gain'] = 0
-        f['piece_type'] = mp.piece_type if mp else 0
+        f['piece_type'] = moving_piece.piece_type if moving_piece else 0
         f['from_col'] = chess.square_file(move.from_square)
         f['from_row'] = chess.square_rank(move.from_square)
         f['to_col'] = chess.square_file(move.to_square)
@@ -212,12 +222,21 @@ def _extract_tactical_features(board, move, prev_move, prev_board):
     if move is None:
         return {'accepted_sacrifice': 0, 'interposition_defence': 0, 'recapture': 0}
     f = {}
-    if board.is_capture(move) and prev_move is not None and prev_move.to_square == move.to_square:
+    previous_moved_piece = board.piece_at(prev_move.to_square) if prev_move is not None else None
+    previous_captured_piece = prev_board.piece_at(prev_move.to_square) if prev_move is not None and prev_board is not None else None
+    if (
+        board.is_capture(move)
+        and prev_move is not None
+        and prev_move.to_square == move.to_square
+        and previous_moved_piece is not None
+        and previous_captured_piece is not None
+        and PIECE_VALUES.get(previous_moved_piece.piece_type, 0) > PIECE_VALUES.get(previous_captured_piece.piece_type, 0)
+    ):
         f['accepted_sacrifice'] = 1
     else:
         f['accepted_sacrifice'] = 0
-    mp = board.piece_at(move.from_square)
-    if board.is_check() and mp and mp.piece_type != chess.KING and not board.is_capture(move):
+    moving_piece = board.piece_at(move.from_square)
+    if board.is_check() and moving_piece and moving_piece.piece_type != chess.KING and not board.is_capture(move):
         f['interposition_defence'] = 1
     else:
         f['interposition_defence'] = 0
@@ -260,10 +279,7 @@ def build_advanced_features(df, data_file_name, max_half_moves=10):
         p_count, o_count = 0, 0
 
         for move_uci in moves_uci[:max_half_moves]:
-            try:
-                move = chess.Move.from_uci(move_uci)
-            except Exception:
-                break
+            move = chess.Move.from_uci(move_uci)
 
             is_player = board.turn == player_color
             if is_player:
@@ -300,8 +316,10 @@ def build_advanced_features(df, data_file_name, max_half_moves=10):
 
 
 def _chebyshev(sq1, sq2):
-    return max(abs(chess.square_file(sq1) - chess.square_file(sq2)),
-               abs(chess.square_rank(sq1) - chess.square_rank(sq2)))
+    return max(
+        abs(chess.square_file(sq1) - chess.square_file(sq2)),
+        abs(chess.square_rank(sq1) - chess.square_rank(sq2)),
+    )
 
 
 def _piece_participation_stats(fen, moves_str):
@@ -371,13 +389,18 @@ def extract_board_stats(fen):
 
 
 def build_features(df, save_csv_path=None):
+    if save_csv_path is None:
+        save_csv_path = os.path.join(os.path.dirname(__file__), '..', '..', 'filtered_struct_features.csv')
+        save_csv_path = os.path.normpath(save_csv_path)
+    print(f"Struct feat path: {save_csv_path}")
+    if os.path.exists(save_csv_path):
+        cached = pd.read_csv(save_csv_path)
+        print("read cached features")
+        if len(cached) == len(df):
+            print("returned cached features")
+            return cached.values.astype(np.float32)
     tqdm.pandas(desc="Solution length")
     length = df['Moves'].progress_apply(lambda x: len(str(x).split())).values
-
-    if save_csv_path is not None and os.path.exists(save_csv_path):
-        cached = pd.read_csv(save_csv_path)
-        if len(cached) == len(df):
-            return cached.values.astype(np.float32)
 
     feats = pd.DataFrame(index=df.index)
     feats['SolutionLength'] = length
