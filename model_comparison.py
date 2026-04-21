@@ -8,12 +8,16 @@ import pandas as pd
 import lightgbm as lgb
 import mlflow
 import joblib
+import torch
+import torch.nn as nn
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import KFold
-from sklearn.neural_network import MLPRegressor
-from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from torch.optim import Adam
+from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import DataLoader
+from torch.utils.data import TensorDataset
 from catboost import CatBoostRegressor
 
 CURRENT_DIR = os.path.dirname(__file__)
@@ -41,6 +45,124 @@ RANDOM_FOREST_TREES = 500
 MLP_MAX_ITER = 5000
 LOG_PERIOD = 100
 CV_FOLDS = 5
+MLP_BATCH_SIZE = 128
+MLP_DROPOUT = 0.15
+MLP_PATIENCE = 8
+MLP_VALIDATION_CHECK_INTERVAL = 1
+
+
+class MLPNetwork(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(MLP_DROPOUT),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(MLP_DROPOUT),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(MLP_DROPOUT),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, inputs):
+        return self.network(inputs).squeeze(-1)
+
+
+class MLPRegressor:
+    def __init__(self, input_dim, learning_rate_init, max_iter, random_state):
+        self.input_dim = input_dim
+        self.learning_rate_init = learning_rate_init
+        self.max_iter = max_iter
+        self.random_state = random_state
+        self.scaler = StandardScaler()
+        self.device = torch.device("cuda")
+        self.model = None
+
+    def _ensure_model(self, input_dim):
+        if self.model is None:
+            self.input_dim = input_dim
+            self.model = MLPNetwork(input_dim).to(self.device)
+
+    def fit(self, X_train, y_train, X_val, y_val):
+        torch.manual_seed(self.random_state)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.random_state)
+
+        self._ensure_model(X_train.shape[1])
+
+        X_train_scaled = self.scaler.fit_transform(X_train).astype(np.float32)
+        X_val_scaled = self.scaler.transform(X_val).astype(np.float32)
+        y_train_np = np.asarray(y_train, dtype=np.float32)
+        y_val_np = np.asarray(y_val, dtype=np.float32)
+
+        train_dataset = TensorDataset(
+            torch.from_numpy(X_train_scaled),
+            torch.from_numpy(y_train_np),
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=MLP_BATCH_SIZE,
+            shuffle=True,
+        )
+
+        X_val_tensor = torch.from_numpy(X_val_scaled).to(self.device)
+        y_val_tensor = torch.from_numpy(y_val_np).to(self.device)
+
+        criterion = nn.MSELoss()
+        optimizer = Adam(self.model.parameters(), lr=self.learning_rate_init)
+        scheduler = LambdaLR(optimizer, lr_lambda=lambda step: 1.0 / np.sqrt(max(step, 1)))
+
+        best_val_mse = float("inf")
+        best_state = None
+        checks_without_improvement = 0
+
+        for epoch in range(1, self.max_iter + 1):
+            self.model.train()
+            for batch_inputs, batch_targets in train_loader:
+                batch_inputs = batch_inputs.to(self.device)
+                batch_targets = batch_targets.to(self.device)
+
+                optimizer.zero_grad()
+                predictions = self.model(batch_inputs)
+                loss = criterion(predictions, batch_targets)
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+
+            if epoch % MLP_VALIDATION_CHECK_INTERVAL != 0:
+                continue
+
+            self.model.eval()
+            with torch.no_grad():
+                val_predictions = self.model(X_val_tensor)
+                val_mse = criterion(val_predictions, y_val_tensor).item()
+
+            if val_mse < best_val_mse:
+                best_val_mse = val_mse
+                best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+                checks_without_improvement = 0
+            else:
+                checks_without_improvement += 1
+                if checks_without_improvement >= MLP_PATIENCE:
+                    break
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
+
+    def predict(self, X_eval):
+        if self.model is None:
+            raise RuntimeError("Model has not been fitted.")
+        X_eval_scaled = self.scaler.transform(X_eval).astype(np.float32)
+        X_eval_tensor = torch.from_numpy(X_eval_scaled).to(self.device)
+        self.model.eval()
+        with torch.no_grad():
+            predictions = self.model(X_eval_tensor).cpu().numpy()
+        return predictions
 
 
 def evaluate_model(model, X_eval, y_eval):
@@ -110,24 +232,24 @@ def build_catboost():
 
 def build_mlp():
     params = {
-        "hidden_layer_sizes": (512, 256, 128),
+        "hidden_layer_sizes": (512, 256, 128, 64),
         "activation": "relu",
-        "solver": "adam",
-        "alpha": 1e-4,
-        "batch_size": 256,
+        "dropout": MLP_DROPOUT,
         "learning_rate_init": 1e-3,
         "max_iter": MLP_MAX_ITER,
-        "early_stopping": True,
-        "validation_fraction": 0.1,
-        "n_iter_no_change": EARLY_STOPPING_ROUNDS,
+        "batch_size": MLP_BATCH_SIZE,
+        "optimizer": "adam",
+        "scheduler": "inverse_sqrt",
+        "patience": MLP_PATIENCE,
+        "validation_check_interval": MLP_VALIDATION_CHECK_INTERVAL,
         "random_state": RANDOM_STATE,
-        "verbose": True,
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
     }
-    model = Pipeline(
-        [
-            ("scaler", StandardScaler()),
-            ("mlp", MLPRegressor(**params)),
-        ]
+    model = MLPRegressor(
+        input_dim=None,
+        learning_rate_init=params["learning_rate_init"],
+        max_iter=params["max_iter"],
+        random_state=params["random_state"],
     )
     return model, params
 
@@ -175,7 +297,7 @@ def fit_model(model_name, model, X_train, y_train, X_val, y_val):
         model.fit(**fit_kwargs)
         return
 
-    model.fit(X_train, y_train)
+    model.fit(X_train, y_train, X_val, y_val)
 
 
 def log_model_to_mlflow(model_name, model):
@@ -187,6 +309,10 @@ def log_model_to_mlflow(model_name, model):
         mlflow.catboost.log_model(model, model_name)
         return
 
+    if model_name == "mlp":
+        mlflow.pytorch.log_model(model.model, model_name)
+        return
+
     mlflow.sklearn.log_model(model, model_name)
 
 
@@ -196,6 +322,19 @@ def save_model(model_name, model, model_dir):
     if model_name == "catboost":
         model_path = os.path.join(model_dir, f"{model_name}.cbm")
         model.save_model(model_path)
+        return model_path
+
+    if model_name.startswith("mlp"):
+        model_path = os.path.join(model_dir, f"{model_name}.pt")
+        torch.save(
+            {
+                "state_dict": model.model.state_dict(),
+                "scaler_mean": model.scaler.mean_,
+                "scaler_scale": model.scaler.scale_,
+                "input_dim": model.input_dim,
+            },
+            model_path,
+        )
         return model_path
 
     model_path = os.path.join(model_dir, f"{model_name}.pkl")
