@@ -1,3 +1,4 @@
+import argparse
 import subprocess
 import sys
 import os
@@ -16,23 +17,36 @@ COMMON_ARGS = {
     "--splits_path": "./data/filtered_splits.npz",
 }
 
-DEVICES = ["cuda"]
+LIGHTGBM_DEVICES = ["cuda"]
+CATBOOST_CUDA_DEVICES = [0]
+MAX_WORKERS = 2
 
 
-def build_command(maia_sources, blocks, device):
-    cmd = [sys.executable, os.path.join(os.path.dirname(__file__), "lightgbm_maia_specialist.py")]
-    cmd += ["--maia_sources"] + maia_sources
+def build_command(trainer, maia_sources, blocks, device, max_rows):
+    if trainer == "lightgbm":
+        script_name = "lightgbm_maia_specialist.py"
+    else:
+        script_name = "train_catboost_full_dataset.py"
+
+    cmd = [sys.executable, os.path.join(os.path.dirname(__file__), script_name)]
+    if trainer == "lightgbm":
+        cmd += ["--maia_sources"] + maia_sources
     cmd += ["--blocks"] + blocks
-    cmd += ["--device", device]
+    if trainer == "lightgbm":
+        cmd += ["--device", device]
+    else:
+        cmd += ["--cuda_device", str(device)]
+    if max_rows is not None:
+        cmd += ["--max_rows", str(max_rows)]
     for k, v in COMMON_ARGS.items():
         cmd += [k, v]
     return cmd
 
 
-def run_one(label, maia_sources, blocks, device):
-    print(f"[START] {label} on {device}  blocks={blocks}")
+def run_one(trainer, label, maia_sources, blocks, device, max_rows):
+    print(f"[START] {label} trainer={trainer} device={device} blocks={blocks}")
     result = subprocess.run(
-        build_command(maia_sources, blocks, device),
+        build_command(trainer, maia_sources, blocks, device, max_rows),
         cwd=os.path.dirname(__file__),
         capture_output=False,
         text=True,
@@ -43,6 +57,11 @@ def run_one(label, maia_sources, blocks, device):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--trainer", choices=["lightgbm", "catboost"], default="lightgbm")
+    parser.add_argument("--max_rows", type=int, default=None)
+    args = parser.parse_args()
+
     jobs = []
 
     jobs.append(("all_blocks", MAIA_SOURCES, ALL_BLOCKS))
@@ -52,17 +71,18 @@ if __name__ == "__main__":
         label = f"no_{removed_block}"
         jobs.append((label, MAIA_SOURCES, blocks))
 
-    assigned = [(label, sources, blocks, DEVICES[i % len(DEVICES)]) for i, (label, sources, blocks) in enumerate(jobs)]
+    devices = LIGHTGBM_DEVICES if args.trainer == "lightgbm" else CATBOOST_CUDA_DEVICES
+    assigned = [(label, sources, blocks, devices[i % len(devices)]) for i, (label, sources, blocks) in enumerate(jobs)]
 
-    print(f"Running {len(assigned)} ablation jobs (2 in parallel):\n")
+    print(f"Running {len(assigned)} ablation jobs with trainer={args.trainer} ({MAX_WORKERS} in parallel):\n")
     for label, _, blocks, device in assigned:
         print(f"  {label:20s}  blocks={blocks}  -> {device}")
     print()
 
     failed = []
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = {
-            pool.submit(run_one, label, sources, blocks, device): label
+            pool.submit(run_one, args.trainer, label, sources, blocks, device, args.max_rows): label
             for label, sources, blocks, device in assigned
         }
         for future in as_completed(futures):
