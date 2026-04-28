@@ -39,9 +39,9 @@ class ChessPuzzleDataset:
     def _filter_mask(self, df):
         if not self.filter_rating_deviation:
             return np.ones(len(df), dtype=bool)
-        if "RatingDeviation" not in df.columns or "NbPlays" not in df.columns:
+        if "RatingDeviation" not in df.columns:
             return np.ones(len(df), dtype=bool)
-        return ((df["RatingDeviation"] <= 90) & (df["NbPlays"] > 150)).to_numpy()
+        return (df["RatingDeviation"] <= 90).to_numpy()
 
     def _cache_path(self):
         suffix = ""
@@ -117,11 +117,9 @@ class ChessPuzzleDataset:
             else:
                 manifest = json.loads(str(cached["manifest"]))
                 df = pd.DataFrame(list(cached["df_records"]))
-                mask = self._filter_mask(df)
-                df = df.loc[mask].reset_index(drop=True)
-                y = cached["y"][mask]
+                y = cached["y"]
                 for name in manifest:
-                    cached_blocks[name] = cached[f"block_{name}"][mask]
+                    cached_blocks[name] = cached[f"block_{name}"]
                 cached_blocks.pop("struct", None)
                 manifest.pop("struct", None)
                 print(f"Cache hit: {list(cached_blocks.keys())} blocks, {y.shape[0]} rows")
