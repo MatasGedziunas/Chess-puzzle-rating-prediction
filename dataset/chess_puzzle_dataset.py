@@ -122,7 +122,9 @@ class ChessPuzzleDataset:
                 y = cached["y"][mask]
                 for name in manifest:
                     cached_blocks[name] = cached[f"block_{name}"][mask]
-                print(f"Cache hit: {list(manifest.keys())} blocks, {y.shape[0]} rows")
+                cached_blocks.pop("struct", None)
+                manifest.pop("struct", None)
+                print(f"Cache hit: {list(cached_blocks.keys())} blocks, {y.shape[0]} rows")
 
         missing = [name for name in requested if name not in manifest]
 

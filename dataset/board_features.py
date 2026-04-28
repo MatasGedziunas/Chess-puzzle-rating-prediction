@@ -393,12 +393,6 @@ def build_features(df, save_csv_path=None):
         save_csv_path = os.path.join(os.path.dirname(__file__), '..', '..', 'filtered_struct_features.csv')
         save_csv_path = os.path.normpath(save_csv_path)
     print(f"Struct feat path: {save_csv_path}")
-    if os.path.exists(save_csv_path):
-        cached = pd.read_csv(save_csv_path)
-        print("read cached features")
-        if len(cached) == len(df):
-            print("returned cached features")
-            return cached.values.astype(np.float32)
     tqdm.pandas(desc="Solution length")
     length = df['Moves'].progress_apply(lambda x: len(str(x).split())).values
 
@@ -409,8 +403,6 @@ def build_features(df, save_csv_path=None):
     tqdm.pandas(desc="Board stats")
     stats = df['FEN'].progress_apply(extract_board_stats).apply(pd.Series)
     feats = pd.concat([feats, stats], axis=1)
-    prob_cols = [c for c in df.columns if 'success_prob_blitz' in c or 'success_prob_rapid' in c]
-    feats = pd.concat([feats, df[prob_cols]], axis=1)
     tqdm.pandas(desc="Participation stats")
     participation = df.progress_apply(lambda r: _piece_participation_stats(r['FEN'], r['Moves']), axis=1).apply(pd.Series)
     feats = pd.concat([feats, participation], axis=1)
