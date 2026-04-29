@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import mlflow
+import optuna
 import numpy as np
 import pandas as pd
 from catboost import CatBoostRegressor
@@ -37,7 +38,7 @@ def configure_cuda_device(cuda_device):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_device)
 
 
-def build_catboost():
+def build_catboost(overrides=None):
     params = {
         "iterations": BOOSTING_ROUNDS,
         "early_stopping_rounds": 200,
@@ -52,6 +53,8 @@ def build_catboost():
         "task_type": "GPU",
         "devices": "0",
     }
+    if overrides:
+        params.update(overrides)
     model = CatBoostRegressor(**params)
     return model, params
 
@@ -74,6 +77,48 @@ def build_results_dir(data_file_name):
     return os.path.join(CURRENT_DIR, "results", data_file_name)
 
 
+def tune_catboost_with_optuna(X_train, y_train, X_val, y_val, n_trials):
+    default_overrides = {
+        "learning_rate": 0.05,
+        "depth": 6,
+        "min_data_in_leaf": 20,
+        "l2_leaf_reg": 3.0,
+        "random_strength": 1.0,
+        "bagging_temperature": 0.0,
+        "border_count": 255,
+    }
+
+    def objective(trial):
+        overrides = {
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "depth": trial.suggest_int("depth", 4, 10),
+            "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 5, 100),
+            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-3, 30.0, log=True),
+            "random_strength": trial.suggest_float("random_strength", 1e-3, 10.0, log=True),
+            "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 10.0),
+            "border_count": trial.suggest_categorical("border_count", [128, 255]),
+        }
+        model, _ = build_catboost(overrides=overrides)
+        model.fit(
+            X_train,
+            y_train,
+            eval_set=(X_val, y_val),
+            use_best_model=True,
+            verbose=False,
+        )
+        val_mse, val_rmse = evaluate_model(model, X_val, y_val)
+        trial.set_user_attr("val_rmse", val_rmse)
+        best_iteration = model.get_best_iteration()
+        if best_iteration is not None:
+            trial.set_user_attr("best_iteration", int(best_iteration))
+        return val_mse
+
+    study = optuna.create_study(direction="minimize")
+    study.enqueue_trial(default_overrides)
+    study.optimize(objective, n_trials=n_trials)
+    return study
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--csv_path", default=DEFAULT_CSV_PATH)
@@ -93,6 +138,12 @@ if __name__ == "__main__":
         "--splits_path",
         default=None,
         help="Path to .npz file with train_idx/val_idx/test_idx. If not provided, splits are recomputed with the default random seed.",
+    )
+    parser.add_argument(
+        "--optuna_trials",
+        type=int,
+        default=0,
+        help="Run Optuna hyperparameter search before final CatBoost training.",
     )
     args = parser.parse_args()
 
@@ -161,8 +212,32 @@ if __name__ == "__main__":
         mlflow.log_param("num_val", len(X_val))
         mlflow.log_param("num_test", len(X_test))
         mlflow.log_param("training_scheme", "train_val_test_no_cv")
+        mlflow.log_param("optuna_trials", args.optuna_trials)
 
-        model, model_params = build_catboost()
+        best_overrides = None
+        if args.optuna_trials > 0:
+            study = tune_catboost_with_optuna(
+                X_train,
+                y_train,
+                X_val,
+                y_val,
+                n_trials=args.optuna_trials,
+            )
+            best_overrides = study.best_trial.params
+            optuna_trials_path = os.path.join(
+                results_dir,
+                f"optuna_trials_catboost_full_dataset_{max_rows_label}_{blocks_label}.csv",
+            )
+            study.trials_dataframe().to_csv(optuna_trials_path, index=False)
+            mlflow.log_metric("optuna_best_val_mse", study.best_value)
+            if "val_rmse" in study.best_trial.user_attrs:
+                mlflow.log_metric("optuna_best_val_rmse", study.best_trial.user_attrs["val_rmse"])
+            if "best_iteration" in study.best_trial.user_attrs:
+                mlflow.log_metric("optuna_best_iteration", study.best_trial.user_attrs["best_iteration"])
+            mlflow.log_params({f"optuna_{key}": value for key, value in best_overrides.items()})
+            mlflow.log_param("optuna_trials_csv", optuna_trials_path)
+
+        model, model_params = build_catboost(overrides=best_overrides)
         mlflow.log_params({f"model_{key}": value for key, value in model_params.items()})
 
         train_start_time = time.perf_counter()
@@ -191,7 +266,7 @@ if __name__ == "__main__":
 
         results_path = os.path.join(
             results_dir,
-            f"catboost_full_dataset_results_{max_rows_label}_{blocks_label}.csv",
+            f"catboost_full_dataset_results_{args.optuna_trials}_{max_rows_label}_{blocks_label}.csv",
         )
         pd.DataFrame(
             [
@@ -211,6 +286,7 @@ if __name__ == "__main__":
                     "val_rmse": val_rmse,
                     "test_mse": test_mse,
                     "test_rmse": test_rmse,
+                    "optuna_trials": args.optuna_trials,
                     "model_path": model_path,
                     "mlflow_run_id": run.info.run_id,
                 }
